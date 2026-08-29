@@ -11,11 +11,11 @@ public class HelloMusicApplication {
         SpringApplication.run(HelloMusicApplication.class, args);
         System.out.println("\n");
         System.out.println("╔═══════════════════════════════════════════╗");
-        System.out.println("║     🎵 HelloMusic Server Started 🎵      ║");
-        System.out  .println("║                                           ║");
-        System.out.println("║  API: http://localhost:8080/api          ║");
-        System.out.println("║  CLI: Type 'help' in console            ║");
-        System.out.println("║  Broadcast: UDP 9999                    ║");
+        System.out.println("║       HelloMusic Server Started           ║");
+        System.out.println("║                                           ║");
+        System.out.println("║  API: http://localhost:8080/api           ║");
+        System.out.println("║  CLI: Type 'help' in console              ║");
+        System.out.println("║  Broadcast: UDP 9999                      ║");
         System.out.println("╚═══════════════════════════════════════════╝");
         System.out.println("\n");
     }
