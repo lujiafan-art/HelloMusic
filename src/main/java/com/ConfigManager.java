@@ -47,6 +47,7 @@ public class ConfigManager {
         defaultConfig.setBroadcastInterval(30000);
         defaultConfig.setSupportedExtensions(List.of("mp3", "mkv", "flac", "wav", "m4a", "ogg"));
         defaultConfig.setServerName("HelloMusic");
+        defaultConfig.setLastPlayMode("FORWARD");  // 默认播放模式
         return defaultConfig;
     }
 
@@ -69,6 +70,19 @@ public class ConfigManager {
         saveConfig();
     }
 
+    // ========== 新增：播放模式持久化 ==========
+
+    public void savePlayMode(String mode) {
+        config.setLastPlayMode(mode);
+        saveConfig();
+    }
+
+    public String getLastPlayMode() {
+        return config.getLastPlayMode() != null ? config.getLastPlayMode() : "FORWARD";
+    }
+
+    // ========================================
+
     public static class Config {
         private List<String> musicLibraryPaths;
         private int serverPort;
@@ -76,6 +90,7 @@ public class ConfigManager {
         private int broadcastInterval;
         private List<String> supportedExtensions;
         private String serverName;
+        private String lastPlayMode;  // 新增：保存上次播放模式
 
         public List<String> getMusicLibraryPaths() { return musicLibraryPaths; }
         public void setMusicLibraryPaths(List<String> musicLibraryPaths) {
@@ -95,5 +110,7 @@ public class ConfigManager {
         }
         public String getServerName() { return serverName; }
         public void setServerName(String serverName) { this.serverName = serverName; }
+        public String getLastPlayMode() { return lastPlayMode; }
+        public void setLastPlayMode(String lastPlayMode) { this.lastPlayMode = lastPlayMode; }
     }
 }
