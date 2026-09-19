@@ -113,6 +113,8 @@ public class MusicScannerService {
             if (extension.equalsIgnoreCase("mp3")) {
                 try {
                     MusicMetadata metadata = extractMp3Metadata(file);
+                    int duration = Mp3DurationParser.getDuration(file);
+                    metadata.setDuration(duration);
                     musicFile.setMetadata(metadata);
                 } catch (Exception e) {
                     // Metadata extraction failed

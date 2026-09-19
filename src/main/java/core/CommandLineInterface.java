@@ -64,7 +64,6 @@ public class CommandLineInterface implements CommandLineRunner {
             case "config" -> showConfig();
             case "addpath" -> addLibraryPath(args);
             case "removepath" -> removeLibraryPath(args);
-            // 播放列表命令
             case "playlists" -> listPlaylists();
             case "playlist" -> showPlaylist(args);
             case "createplaylist" -> createPlaylist(args);
@@ -136,12 +135,7 @@ public class CommandLineInterface implements CommandLineRunner {
                             }
                         }
                     }
-                    String duration = "";
-                    if (file.getMetadata() != null && file.getMetadata().getDuration() > 0) {
-                        int minutes = file.getMetadata().getDuration() / 60;
-                        int seconds = file.getMetadata().getDuration() % 60;
-                        duration = String.format("[%02d:%02d] ", minutes, seconds);
-                    }
+                    String duration = formatDuration(file);
                     System.out.println("  " + duration + "🎵 " + info + " (" + file.getExtension() + ")  [ID: " + file.getId() + "]");
                 });
 
@@ -175,7 +169,8 @@ public class CommandLineInterface implements CommandLineRunner {
                     }
                 }
             }
-            System.out.println("  🎵 " + info + "  [ID: " + file.getId() + "]");
+            String duration = formatDuration(file);
+            System.out.println("  " + duration + "🎵 " + info + "  [ID: " + file.getId() + "]");
         });
     }
 
@@ -198,7 +193,8 @@ public class CommandLineInterface implements CommandLineRunner {
                                 ? file.getMetadata().getTitle()
                                 : file.getFileName();
                         if (!title.equals("Unknown Title")) {
-                            System.out.println("      🎵 " + title);
+                            String duration = formatDuration(file);
+                            System.out.println("      " + duration + "🎵 " + title);
                         }
                     });
                     if (files.size() > 3) {
@@ -296,8 +292,6 @@ public class CommandLineInterface implements CommandLineRunner {
         }
     }
 
-    // ========== 播放列表命令 ==========
-
     private void listPlaylists() {
         var playlists = playlistService.getAllPlaylists();
         if (playlists.isEmpty()) {
@@ -341,7 +335,8 @@ public class CommandLineInterface implements CommandLineRunner {
                 String artist = song.getMetadata() != null && song.getMetadata().getArtist() != null
                         ? " - " + song.getMetadata().getArtist()
                         : "";
-                System.out.println("  " + index + ". 🎵 " + title + artist);
+                String duration = formatDuration(song);
+                System.out.println("  " + index + ". " + duration + "🎵 " + title + artist);
                 index++;
             }
         }
@@ -416,6 +411,25 @@ public class CommandLineInterface implements CommandLineRunner {
         } else {
             System.out.println("❌ Failed to remove song. Check playlist ID and music ID.");
         }
+    }
+
+    /**
+     * 格式化时长显示
+     * @param file 音乐文件
+     * @return 格式化的时长字符串，如 "[03:45] "，无时长返回空字符串
+     */
+    private String formatDuration(MusicFile file) {
+        if (file.getMetadata() != null && file.getMetadata().getDuration() > 0) {
+            int totalSeconds = file.getMetadata().getDuration();
+            int hours = totalSeconds / 3600;
+            int minutes = (totalSeconds % 3600) / 60;
+            int seconds = totalSeconds % 60;
+            if (hours > 0) {
+                return String.format("[%d:%02d:%02d] ", hours, minutes, seconds);
+            }
+            return String.format("[%02d:%02d] ", minutes, seconds);
+        }
+        return "";
     }
 
     private void exit() {

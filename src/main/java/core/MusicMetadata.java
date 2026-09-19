@@ -1,4 +1,4 @@
-package com;
+package core;
 
 public class MusicMetadata {
     private String title = "Unknown Title";
