@@ -68,9 +68,8 @@ public class MusicScannerService {
     }
 
     private void scanDirectory(Path directory, List<String> extensions, Map<String, MusicFile> library) {
-        try {
-            Files.walk(directory)
-                    .filter(Files::isRegularFile)
+        try (var stream = Files.walk(directory)) {
+            stream.filter(Files::isRegularFile)
                     .filter(path -> isSupportedExtension(path, extensions))
                     .forEach(path -> {
                         try {
@@ -95,7 +94,11 @@ public class MusicScannerService {
     private MusicFile createMusicFile(Path path) {
         try {
             File file = path.toFile();
-            String id = UUID.randomUUID().toString();
+            String absolutePath = file.getAbsolutePath();
+
+            // ✅ 用绝对路径生成稳定 ID（重启/重新扫描不变）
+            String id = UUID.nameUUIDFromBytes(absolutePath.getBytes(StandardCharsets.UTF_8)).toString();
+
             String fileName = file.getName();
             String extension = FilenameUtils.getExtension(fileName);
             long fileSize = file.length();
@@ -105,11 +108,12 @@ public class MusicScannerService {
             );
 
             MusicFile musicFile = new MusicFile(
-                    id, fileName, path.toString(), fileSize, extension, lastModified
+                    id, fileName, absolutePath, fileSize, extension, lastModified
             );
 
             musicFile.setUrl("/api/stream/" + id);
 
+            // 提取 MP3 元数据和时长
             if (extension.equalsIgnoreCase("mp3")) {
                 try {
                     MusicMetadata metadata = extractMp3Metadata(file);
@@ -160,47 +164,41 @@ public class MusicScannerService {
                     metadata.setComment(comment);
 
                     int genreCode = tagBytes[127] & 0xFF;
-                    if (genreCode >= 0 && genreCode < ID3_GENRES.length) {
+                    if (genreCode < ID3_GENRES.length) {
                         metadata.setGenre(ID3_GENRES[genreCode]);
                     } else {
                         metadata.setGenre("Unknown Genre");
                     }
                 } else {
-                    String fileName = file.getName();
-                    int extIndex = fileName.lastIndexOf('.');
-                    String baseName = extIndex > 0 ? fileName.substring(0, extIndex) : fileName;
-
-                    String[] parts = baseName.split(" - ");
-                    if (parts.length >= 2) {
-                        metadata.setArtist(parts[0].trim());
-                        metadata.setTitle(parts[1].trim());
-                        metadata.setAlbum("Unknown Album");
-                    } else {
-                        metadata.setTitle(baseName);
-                        metadata.setArtist("Unknown Artist");
-                        metadata.setAlbum("Unknown Album");
-                    }
-                    metadata.setGenre("Unknown Genre");
+                    // 没有 ID3v1 标签，从文件名解析
+                    parseFileName(file, metadata);
                 }
             } else {
-                String fileName = file.getName();
-                int extIndex = fileName.lastIndexOf('.');
-                String baseName = extIndex > 0 ? fileName.substring(0, extIndex) : fileName;
-
-                String[] parts = baseName.split(" - ");
-                if (parts.length >= 2) {
-                    metadata.setArtist(parts[0].trim());
-                    metadata.setTitle(parts[1].trim());
-                } else {
-                    metadata.setTitle(baseName);
-                    metadata.setArtist("Unknown Artist");
-                }
-                metadata.setAlbum("Unknown Album");
-                metadata.setGenre("Unknown Genre");
+                parseFileName(file, metadata);
             }
         }
 
         return metadata;
+    }
+
+    /**
+     * 从文件名解析「艺术家 - 歌曲名」格式
+     */
+    private void parseFileName(File file, MusicMetadata metadata) {
+        String fileName = file.getName();
+        int extIndex = fileName.lastIndexOf('.');
+        String baseName = extIndex > 0 ? fileName.substring(0, extIndex) : fileName;
+
+        String[] parts = baseName.split(" - ");
+        if (parts.length >= 2) {
+            metadata.setArtist(parts[0].trim());
+            metadata.setTitle(parts[1].trim());
+        } else {
+            metadata.setTitle(baseName);
+            metadata.setArtist("Unknown Artist");
+        }
+        metadata.setAlbum("Unknown Album");
+        metadata.setGenre("Unknown Genre");
     }
 
     private static final String[] ID3_GENRES = {
