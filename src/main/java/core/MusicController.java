@@ -1,15 +1,17 @@
-package com;
+package core;
 
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
@@ -24,8 +26,8 @@ public class MusicController {
 
     @Autowired
     public MusicController(MusicScannerService scannerService,
-                           BroadcastService broadcastService,
-                           ConfigManager configManager) {
+                          BroadcastService broadcastService,
+                          ConfigManager configManager) {
         this.scannerService = scannerService;
         this.broadcastService = broadcastService;
         this.configManager = configManager;
@@ -71,10 +73,10 @@ public class MusicController {
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> getStats() {
         Map<String, Object> stats = Map.of(
-                "totalFiles", scannerService.getLibrarySize(),
-                "scanning", scannerService.isScanning(),
-                "lastScan", scannerService.getLastScanTime(),
-                "config", configManager.getConfig()
+            "totalFiles", scannerService.getLibrarySize(),
+            "scanning", scannerService.isScanning(),
+            "lastScan", scannerService.getLastScanTime(),
+            "config", configManager.getConfig()
         );
         return ResponseEntity.ok(stats);
     }
@@ -88,33 +90,96 @@ public class MusicController {
         return ResponseEntity.ok(Map.of("status", "Scan started"));
     }
 
-    @GetMapping(value = "/stream/{id}", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
-    public ResponseEntity<byte[]> streamMusic(@PathVariable String id) {
+    /**
+     * 流式播放音乐（内存优化 + 支持 Range 拖动）
+     */
+    @GetMapping("/stream/{id}")
+    public ResponseEntity<?> streamMusic(
+            @PathVariable String id,
+            @RequestHeader(value = "Range", required = false) String rangeHeader) {
+
         MusicFile musicFile = scannerService.getMusicById(id).orElse(null);
         if (musicFile == null) {
             return ResponseEntity.notFound().build();
         }
 
+        File file = Paths.get(musicFile.getFilePath()).toFile();
+        if (!file.exists()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        long fileLength = file.length();
+        String contentType = getContentType(musicFile.getExtension());
+
+        // 无 Range → 返回完整文件（流式）
+        if (rangeHeader == null) {
+            try {
+                InputStreamResource resource = new InputStreamResource(new FileInputStream(file));
+                return ResponseEntity.ok()
+                        .contentType(MediaType.parseMediaType(contentType))
+                        .contentLength(fileLength)
+                        .header("Accept-Ranges", "bytes")
+                        .header("X-File-Name", musicFile.getFileName())
+                        .body(resource);
+            } catch (IOException e) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+            }
+        }
+
+        // 有 Range → 返回指定范围
         try {
-            File file = Paths.get(musicFile.getFilePath()).toFile();
-            if (!file.exists()) {
-                return ResponseEntity.notFound().build();
+            String range = rangeHeader.replace("bytes=", "").trim();
+            String[] parts = range.split("-");
+            long start = Long.parseLong(parts[0]);
+            long end = parts.length > 1 && !parts[1].isEmpty()
+                    ? Long.parseLong(parts[1])
+                    : fileLength - 1;
+
+            if (start >= fileLength || end >= fileLength || start > end) {
+                return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                        .header("Content-Range", "bytes */" + fileLength)
+                        .build();
             }
 
-            byte[] data = new byte[(int) file.length()];
-            try (FileInputStream fis = new FileInputStream(file)) {
-                fis.read(data);
-            }
+            long contentLength = end - start + 1;
+            RandomAccessFile raf = new RandomAccessFile(file, "r");
+            raf.seek(start);
 
-            String contentType = getContentType(musicFile.getExtension());
+            InputStream limitedStream = new InputStream() {
+                private long remaining = contentLength;
 
-            return ResponseEntity.ok()
-                    .header(HttpHeaders.CONTENT_TYPE, contentType)
-                    .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(file.length()))
+                @Override
+                public int read() throws IOException {
+                    if (remaining <= 0) return -1;
+                    int b = raf.read();
+                    if (b != -1) remaining--;
+                    return b;
+                }
+
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    if (remaining <= 0) return -1;
+                    int toRead = (int) Math.min(len, remaining);
+                    int read = raf.read(b, off, toRead);
+                    if (read > 0) remaining -= read;
+                    return read;
+                }
+
+                @Override
+                public void close() throws IOException {
+                    raf.close();
+                }
+            };
+
+            return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .contentLength(contentLength)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Range", "bytes " + start + "-" + end + "/" + fileLength)
                     .header("X-File-Name", musicFile.getFileName())
-                    .body(data);
+                    .body(new InputStreamResource(limitedStream));
 
-        } catch (IOException e) {
+        } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
@@ -141,10 +206,10 @@ public class MusicController {
     @GetMapping("/info")
     public ResponseEntity<Map<String, Object>> getInfo() {
         return ResponseEntity.ok(Map.of(
-                "name", "HelloMusic",
-                "version", "1.0.0",
-                "status", "running",
-                "librarySize", scannerService.getLibrarySize()
+            "name", "HelloMusic",
+            "version", "1.0.0",
+            "status", "running",
+            "librarySize", scannerService.getLibrarySize()
         ));
     }
 

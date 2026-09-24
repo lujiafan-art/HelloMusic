@@ -1,4 +1,4 @@
-package com;
+package core;
 
 public enum PlayMode {
     /** 正向播放（顺序播放） */

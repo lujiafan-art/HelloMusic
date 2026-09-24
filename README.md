@@ -2,6 +2,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-007396?logo=java&logoColor=white)](https://adoptium.net/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2.0-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 [![AI Generated](https://img.shields.io/badge/AI-Generated-8A2BE2?logo=openai&logoColor=white)](https://github.com)
 
@@ -22,6 +23,7 @@
 - [网络广播](#网络广播)
 - [项目结构](#项目结构)
 - [技术栈](#技术栈)
+- [开发故事](#开发故事)
 - [贡献指南](#贡献指南)
 - [许可证](#许可证)
 
@@ -33,6 +35,7 @@
 | --- | --- |
 | 自动扫描 | 扫描指定目录下的音乐文件，支持 MP3、MKV、FLAC、WAV、M4A、OGG |
 | 元数据提取 | 自动提取 MP3 文件的 ID3v1 标签（标题、艺术家、专辑、年份、流派） |
+| 时长解析 | 纯 Java 解析 MP3 播放时长，无需第三方库 |
 | 网络广播 | 通过 UDP 广播在局域网中自动发现服务，无需手动输入 IP |
 | REST API | 完整的 RESTful API，支持跨域 (CORS)，可对接任何前端 |
 | 播放列表 | 创建、管理、保存播放列表，数据持久化到 JSON 文件 |
@@ -55,12 +58,13 @@
 | Maven | 3.6+ | 下载地址：https://maven.apache.org/ |
 
 ### 安装步骤
-```bash
+```
 git clone https://github.com/yourusername/HelloMusic.git
 cd HelloMusic
 mvn clean package
 java -jar target/HelloMusic.jar
 ```
+
 ## 配置说明
 
 首次运行会自动生成 `hellomusic-config.json` 配置文件。
@@ -91,16 +95,17 @@ java -jar target/HelloMusic.jar
 ### 修改配置
 
 方式一：直接编辑配置文件
-```bash
+```
 vim hellomusic-config.json
 ```
 
 方式二：通过 API 更新
-```bash
+```
 curl -X PUT http://localhost:8080/api/config -H "Content-Type: application/json" -d '{"musicLibraryPaths":["/new/path/to/music"]}'
 ```
+
 方式三：通过 CLI 命令
-```bash
+```
 addpath /new/path/to/music
 scan
 ```
@@ -198,45 +203,41 @@ scan
 | SHUFFLE | 随机播放（随机选择下一首） |
 
 ### 使用示例
+
 查看当前播放模式
-
 mode
+
 切换播放模式
-
 switch
+
 加载全部音乐到播放队列
-
 loadall
+
 下一首
-
 next
+
 上一首
-
 prev
+
 查看播放队列信息
-
 queue
+
 清空播放队列
-
 clearqueue
-text
-
 
 ### 通过 API
-
 切换为随机播放
-
+```
 curl -X POST "http://localhost:8080/api/playback/mode?mode=SHUFFLE"
+```
 获取当前播放歌曲
-
+```
 curl http://localhost:8080/api/playback/current
+```
 下一首
-
+```
 curl -X POST http://localhost:8080/api/playback/next
-text
-
-
----
+```
 
 ## 命令行界面
 
@@ -272,7 +273,6 @@ text
 | exit | - | 退出服务器 |
 
 ### 使用示例
-
 ```
 help
 list 10
@@ -289,7 +289,9 @@ switch
 next
 queue
 exit
+text
 ```
+
 ## 网络广播
 
 服务器定期向局域网发送 UDP 广播，用于服务自动发现。
@@ -302,8 +304,7 @@ exit
 | 间隔 | 30 秒（可配置） |
 
 ### 广播数据格式
-
-```bash
+```
 {
 "type": "HelloMusic",
 "version": "1.0.0",
@@ -313,11 +314,10 @@ exit
 "timestamp": 1705315200000,
 "api": "/api"
 }
-text
-
+```
 
 ### 客户端监听示例
-
+```
 import socket
 import json
 
@@ -329,8 +329,8 @@ data, addr = sock.recvfrom(1024)
 info = json.loads(data.decode())
 print(f"发现音乐服务器: {info['name']} at {addr[0]}:{info['port']}")
 ```
-## 项目结构
 
+## 项目结构
 ```
 HelloMusic/
 ├── src/main/java/com/
@@ -339,6 +339,7 @@ HelloMusic/
 │ ├── MusicFile.java
 │ ├── MusicMetadata.java
 │ ├── MusicScannerService.java
+│ ├── Mp3DurationParser.java
 │ ├── BroadcastService.java
 │ ├── MusicController.java
 │ ├── Playlist.java
@@ -367,6 +368,7 @@ HelloMusic/
 | Jackson | 最新 | JSON 处理 |
 | Maven | 3.6+ | 构建工具 |
 
+
 ## 贡献指南
 
 1. Fork 本项目
@@ -377,10 +379,13 @@ HelloMusic/
 
 ## 许可证
 
-本项目采用 MIT 许可证。
+本项目采用 GPL V3 许可证。
 
 ## 致谢
 
 - DeepSeek - AI 辅助开发
 - Spring Boot - 应用框架
 - Adoptium - Java 发行版
+
+
+如果这个项目对你有帮助，请给个 Star！

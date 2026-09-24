@@ -1,4 +1,4 @@
-package com;
+package core;
 
 import org.apache.commons.io.FilenameUtils;
 import org.springframework.beans.factory.annotation.Autowired;

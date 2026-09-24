@@ -1,4 +1,4 @@
-package com;
+package core;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
