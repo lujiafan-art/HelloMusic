@@ -58,11 +58,6 @@ public class PlaylistService {
         return new ArrayList<>(playlists.values());
     }
 
-    // 获取单个播放列表（含完整歌曲信息）
-    public Playlist getPlaylist(String id) {
-        return playlists.get(id);
-    }
-
     // 获取播放列表（含歌曲详情）
     public Map<String, Object> getPlaylistWithDetails(String id) {
         Playlist playlist = playlists.get(id);

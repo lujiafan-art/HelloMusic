@@ -14,17 +14,20 @@ public class CommandLineInterface implements CommandLineRunner {
     private final BroadcastService broadcastService;
     private final ConfigManager configManager;
     private final PlaylistService playlistService;
+    private final PlaybackService playbackService;
     private boolean running = true;
 
     @Autowired
     public CommandLineInterface(MusicScannerService scannerService,
                                 BroadcastService broadcastService,
                                 ConfigManager configManager,
-                                PlaylistService playlistService) {
+                                PlaylistService playlistService,
+                                PlaybackService playbackService) {
         this.scannerService = scannerService;
         this.broadcastService = broadcastService;
         this.configManager = configManager;
         this.playlistService = playlistService;
+        this.playbackService = playbackService;
     }
 
     @Override
@@ -64,12 +67,24 @@ public class CommandLineInterface implements CommandLineRunner {
             case "config" -> showConfig();
             case "addpath" -> addLibraryPath(args);
             case "removepath" -> removeLibraryPath(args);
+            // 播放列表命令
             case "playlists" -> listPlaylists();
             case "playlist" -> showPlaylist(args);
             case "createplaylist" -> createPlaylist(args);
             case "deleteplaylist" -> deletePlaylist(args);
             case "addtoplaylist" -> addToPlaylist(args);
             case "removefromplaylist" -> removeFromPlaylist(args);
+            // 播放控制命令
+            case "mode" -> showPlayMode();
+            case "switch" -> switchPlayMode();
+            case "setmode" -> setPlayMode(args);
+            case "next" -> playNext();
+            case "prev" -> playPrevious();
+            case "current" -> showCurrentSong();
+            case "loadall" -> loadAllMusic();
+            case "loadplaylist" -> loadPlaylistToQueue(args);
+            case "queue" -> showQueue();
+            case "clearqueue" -> clearQueue();
             case "exit", "quit" -> exit();
             default -> System.out.println("❌ Unknown command. Type 'help' for available commands.");
         }
@@ -77,29 +92,42 @@ public class CommandLineInterface implements CommandLineRunner {
 
     private void showHelp() {
         System.out.println("""
-            \n╔═══════════════════════════════════════════════════════╗
-            ║           🎵 HelloMusic - Available Commands        ║
+            \n╔════════════════════════════════════════════════════════╗
+            ║           🎵 HelloMusic - Available Commands           ║
             ╠═══════════════════════════════════════════════════════╣
-            ║ help, ?         - Show this help message            ║
-            ║ list [count]    - List music files                  ║
-            ║ search <query>  - Search for music                  ║
-            ║ artists         - List all artists                  ║
-            ║ stats           - Show statistics                   ║
-            ║ scan            - Scan library                      ║
-            ║ broadcast       - Send broadcast                    ║
-            ║ config          - Show configuration                ║
-            ║ addpath <path>  - Add library path                  ║
-            ║ removepath <idx>- Remove library path               ║
-            ║                                                      ║
-            ║ 📋 Playlist Commands:                               ║
-            ║ playlists       - List all playlists                ║
-            ║ playlist <id>   - Show playlist details             ║
-            ║ createplaylist <name> - Create a playlist           ║
-            ║ deleteplaylist <id>   - Delete a playlist           ║
-            ║ addtoplaylist <pid> <mid> - Add song to playlist    ║
-            ║ removefromplaylist <pid> <mid> - Remove song        ║
-            ║                                                      ║
-            ║ exit, quit      - Exit application                  ║
+            ║ help, ?         - Show this help message              ║
+            ║ list [count]    - List music files                    ║
+            ║ search <query>  - Search for music                    ║
+            ║ artists         - List all artists                    ║
+            ║ stats           - Show statistics                     ║
+            ║ scan            - Scan library                        ║
+            ║ broadcast       - Send broadcast                      ║
+            ║ config          - Show configuration                  ║
+            ║ addpath <path>  - Add library path                    ║
+            ║ removepath <idx>- Remove library path                 ║
+            ║                                                       ║
+            ║ 📋 Playlist Commands:                                 ║
+            ║ playlists       - List all playlists                  ║
+            ║ playlist <id>   - Show playlist details               ║
+            ║ createplaylist <name> - Create a playlist             ║
+            ║ deleteplaylist <id>   - Delete a playlist             ║
+            ║ addtoplaylist <pid> <mid> - Add song to playlist      ║
+            ║ removefromplaylist <pid> <mid> - Remove song          ║
+            ║                                                       ║
+            ║ ▶ Playback Commands:                                  ║
+            ║ mode            - Show current play mode              ║
+            ║ switch          - Switch to next play mode            ║
+            ║ setmode <mode>  - Set play mode (FORWARD/REVERSE/     ║
+            ║                   SINGLE/SHUFFLE)                     ║
+            ║ current         - Show current playing song           ║
+            ║ next            - Play next song                      ║
+            ║ prev            - Play previous song                  ║
+            ║ loadall         - Load all music to queue             ║
+            ║ loadplaylist <id> - Load playlist to queue            ║
+            ║ queue           - Show queue info                     ║
+            ║ clearqueue      - Clear queue                         ║
+            ║                                                       ║
+            ║ exit, quit      - Exit application                    ║
             ╚═══════════════════════════════════════════════════════╝
             """);
     }
@@ -214,6 +242,8 @@ public class CommandLineInterface implements CommandLineRunner {
         System.out.println("║ Broadcast Port: " + String.format("%-20d", config.getBroadcastPort()) + "║");
         System.out.println("║ Broadcast Int:  " + String.format("%-20d", config.getBroadcastInterval()) + "ms║");
         System.out.println("║ Playlists:      " + String.format("%-20d", playlistService.getAllPlaylists().size()) + "║");
+        System.out.println("║ Play Mode:      " + String.format("%-20s", playbackService.getCurrentMode().getDisplayName()) + "║");
+        System.out.println("║ Queue Size:     " + String.format("%-20d", playbackService.getQueue().size()) + "║");
         System.out.println("╚═══════════════════════════════════════╝");
         System.out.println("\n📁 Library Paths:");
         config.getMusicLibraryPaths().forEach(path -> System.out.println("  📂 " + path));
@@ -291,6 +321,8 @@ public class CommandLineInterface implements CommandLineRunner {
             System.out.println("❌ Please provide a valid number.");
         }
     }
+
+    // ========== 播放列表命令 ==========
 
     private void listPlaylists() {
         var playlists = playlistService.getAllPlaylists();
@@ -411,6 +443,132 @@ public class CommandLineInterface implements CommandLineRunner {
         } else {
             System.out.println("❌ Failed to remove song. Check playlist ID and music ID.");
         }
+    }
+
+    // ========== 播放控制命令 ==========
+
+    private void showPlayMode() {
+        PlayMode mode = playbackService.getCurrentMode();
+        System.out.println("\n🎵 当前播放模式: " + mode.getDisplayName());
+        System.out.println("  可用模式: FORWARD (正向) / REVERSE (逆向) / SINGLE (单曲) / SHUFFLE (随机)");
+        System.out.println("  使用 'switch' 切换，或 'setmode <模式>' 直接设置\n");
+    }
+
+    private void switchPlayMode() {
+        PlayMode mode = playbackService.switchMode();
+        System.out.println("✅ 已切换为: " + mode.getDisplayName());
+    }
+
+    private void setPlayMode(String args) {
+        if (args.isEmpty()) {
+            System.out.println("❌ 请提供播放模式。");
+            System.out.println("用法: setmode <FORWARD|REVERSE|SINGLE|SHUFFLE>");
+            return;
+        }
+        try {
+            PlayMode mode = PlayMode.valueOf(args.trim().toUpperCase());
+            playbackService.setMode(mode);
+            System.out.println("✅ 已设置为: " + mode.getDisplayName());
+        } catch (IllegalArgumentException e) {
+            System.out.println("❌ 无效的播放模式: " + args);
+            System.out.println("可用模式: FORWARD, REVERSE, SINGLE, SHUFFLE");
+        }
+    }
+
+    private void playNext() {
+        MusicFile song = playbackService.next();
+        if (song == null) {
+            System.out.println("⏹ 播放队列为空，请先使用 'loadall' 加载音乐");
+            return;
+        }
+        System.out.println("▶ 下一首: " + formatSongInfo(song));
+    }
+
+    private void playPrevious() {
+        MusicFile song = playbackService.previous();
+        if (song == null) {
+            System.out.println("⏹ 播放队列为空，请先使用 'loadall' 加载音乐");
+            return;
+        }
+        System.out.println("⏮ 上一首: " + formatSongInfo(song));
+    }
+
+    private void showCurrentSong() {
+        MusicFile song = playbackService.getCurrentSong();
+        if (song == null) {
+            System.out.println("⏹ 当前没有播放中的歌曲");
+            return;
+        }
+        System.out.println("🎵 当前播放: " + formatSongInfo(song));
+    }
+
+    private void loadAllMusic() {
+        if (scannerService.getLibrarySize() == 0) {
+            System.out.println("📭 音乐库为空，请先执行 'scan'");
+            return;
+        }
+        playbackService.loadAllMusic();
+        System.out.println("✅ 已加载全部 " + playbackService.getQueue().size() + " 首歌曲到播放队列");
+    }
+
+    private void loadPlaylistToQueue(String args) {
+        if (args.isEmpty()) {
+            System.out.println("❌ 请提供播放列表 ID。");
+            System.out.println("用法: loadplaylist <playlistId>");
+            return;
+        }
+        var details = playlistService.getPlaylistWithDetails(args);
+        if (details == null) {
+            System.out.println("❌ 播放列表不存在: " + args);
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        List<MusicFile> songs = (List<MusicFile>) details.get("songs");
+        if (songs.isEmpty()) {
+            System.out.println("⚠️  播放列表为空");
+            return;
+        }
+        List<String> ids = songs.stream().map(MusicFile::getId).toList();
+        playbackService.loadPlaylist(ids);
+        System.out.println("✅ 已加载播放列表「" + details.get("name") + "」(" + ids.size() + " 首歌曲)");
+    }
+
+    private void showQueue() {
+        Map<String, Object> info = playbackService.getQueueInfo();
+        System.out.println("\n╔═══════════════════════════════════════╗");
+        System.out.println("║       📋 播放队列信息                 ║");
+        System.out.println("╠═══════════════════════════════════════╣");
+        System.out.println("║ 播放模式:  " + String.format("%-25s", info.get("playMode")) + "║");
+        System.out.println("║ 总歌曲数:  " + String.format("%-25s", info.get("total")) + "║");
+        System.out.println("║ 当前位置:  " + String.format("%-25s", info.get("currentIndex")) + "║");
+        System.out.println("║ 是否为空:  " + String.format("%-25s", info.get("isEmpty")) + "║");
+        System.out.println("╚═══════════════════════════════════════╝");
+
+        Object current = info.get("currentSong");
+        if (current instanceof MusicFile song) {
+            System.out.println("🎵 当前播放: " + formatSongInfo(song));
+        } else {
+            System.out.println("⏹ 当前没有播放中的歌曲");
+        }
+        System.out.println();
+    }
+
+    private void clearQueue() {
+        playbackService.clearQueue();
+        System.out.println("✅ 播放队列已清空");
+    }
+
+    /**
+     * 格式化歌曲信息（标题 - 艺术家）
+     */
+    private String formatSongInfo(MusicFile song) {
+        String title = song.getMetadata() != null && song.getMetadata().getTitle() != null
+                ? song.getMetadata().getTitle()
+                : song.getFileName();
+        String artist = song.getMetadata() != null && song.getMetadata().getArtist() != null
+                ? song.getMetadata().getArtist()
+                : "Unknown Artist";
+        return title + " - " + artist;
     }
 
     /**

@@ -1,5 +1,6 @@
 package core;
 
+@SuppressWarnings({"unused", "WeakerAccess"})
 public class MusicMetadata {
     private String title = "Unknown Title";
     private String artist = "Unknown Artist";
