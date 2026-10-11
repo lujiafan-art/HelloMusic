@@ -2,12 +2,13 @@
 
 [![Java](https://img.shields.io/badge/Java-21-007396?logo=java&logoColor=white)](https://adoptium.net/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2.0-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 [![AI Generated](https://img.shields.io/badge/AI-Generated-8A2BE2?logo=openai&logoColor=white)](https://github.com)
 
 > 本项目由 AI 辅助生成 - 基于深度求索（DeepSeek）AI 模型，通过自然语言对话完成完整项目开发
 
-一个轻量级的本地音乐服务器，支持 TCP 广播发现、REST API、播放列表、播放控制和命令行界面。让你的音乐在局域网中随时可用。
+一个轻量级的本地音乐服务器，支持 UDP 广播发现、REST API、播放列表、播放控制和命令行界面。让你的音乐在局域网中随时可用。
 
 ---
 
@@ -20,9 +21,9 @@
 - [播放控制](#播放控制)
 - [命令行界面](#命令行界面)
 - [网络广播](#网络广播)
+- [测试](#测试)
 - [项目结构](#项目结构)
 - [技术栈](#技术栈)
-- [开发故事](#开发故事)
 - [贡献指南](#贡献指南)
 - [许可证](#许可证)
 
@@ -33,8 +34,8 @@
 | 功能 | 说明 |
 | --- | --- |
 | 自动扫描 | 扫描指定目录下的音乐文件，支持 MP3、MKV、FLAC、WAV、M4A、OGG |
-| 元数据提取 | 自动提取 MP3 文件的 ID3v1 标签（标题、艺术家、专辑、年份、流派） |
-| 时长解析 | 纯 Java 解析 MP3 播放时长，无需第三方库 |
+| 元数据提取 | 基于 Jaudiotagger 提取 MP3(ID3v1/v2)、FLAC、M4A、OGG、WAV 的标签（标题、艺术家、专辑、年份、流派、音轨号），支持 UTF-8/GBK 中文标签 |
+| 时长解析 | 读取各格式音频的时长与比特率（MP3 额外提供纯 Java 解析兜底） |
 | 网络广播 | 通过 UDP 广播在局域网中自动发现服务，无需手动输入 IP |
 | REST API | 完整的 RESTful API，支持跨域 (CORS)，可对接任何前端 |
 | 播放列表 | 创建、管理、保存播放列表，数据持久化到 JSON 文件 |
@@ -58,7 +59,7 @@
 
 ### 安装步骤
 ```
-git clone https://github.com/yourusername/HelloMusic.git
+git clone https://github.com/lujiafan-art/HelloMusic.git
 cd HelloMusic
 mvn clean package
 java -jar target/HelloMusic.jar
@@ -84,10 +85,10 @@ java -jar target/HelloMusic.jar
 | 参数 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | musicLibraryPaths | String[] | ["~/Music"] | 音乐库目录路径列表 |
-| serverPort | int | 8080 | HTTP 服务端口 |
+| serverPort | int | 8080 | HTTP 服务端口（修改后需重启生效） |
 | broadcastPort | int | 9999 | UDP 广播端口 |
 | broadcastInterval | int | 30000 | 广播间隔（毫秒） |
-| supportedExtensions | String[] | ["mp3","mkv"] | 支持的文件扩展名 |
+| supportedExtensions | String[] | ["mp3","mkv","flac","wav","m4a","ogg"] | 支持的文件扩展名 |
 | serverName | String | "HelloMusic" | 服务器名称 |
 | lastPlayMode | String | "FORWARD" | 上次播放模式（自动保存） |
 
@@ -157,6 +158,7 @@ scan
 | POST | /api/playback/previous | 上一首 |
 | POST | /api/playback/load/all | 加载全部音乐到队列 |
 | POST | /api/playback/load | 加载指定列表到队列 |
+| POST | /api/playback/load/playlist/{id} | 加载歌单到队列 |
 | GET | /api/playback/queue | 获取播放队列信息 |
 | DELETE | /api/playback/queue | 清空播放队列 |
 | POST | /api/playback/queue/add?musicId= | 添加歌曲到队列 |
@@ -203,6 +205,7 @@ scan
 
 ### 使用示例
 
+```
 查看当前播放模式
 mode
 
@@ -223,6 +226,7 @@ queue
 
 清空播放队列
 clearqueue
+```
 
 ### 通过 API
 切换为随机播放
@@ -243,7 +247,6 @@ curl -X POST http://localhost:8080/api/playback/next
 启动服务器后，可以在终端中使用交互式 CLI。
 
 ### 命令列表
-
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |
 | help | - | 显示帮助信息 |
@@ -264,9 +267,12 @@ curl -X POST http://localhost:8080/api/playback/next
 | removefromplaylist | pid mid | 从播放列表移除歌曲 |
 | mode | - | 显示当前播放模式 |
 | switch | - | 切换播放模式 |
+| setmode | mode | 直接设置播放模式 |
+| current | - | 显示当前播放歌曲 |
 | next | - | 下一首 |
 | prev | - | 上一首 |
 | loadall | - | 加载全部音乐到队列 |
+| loadplaylist | id | 加载播放列表到队列 |
 | queue | - | 显示播放队列信息 |
 | clearqueue | - | 清空播放队列 |
 | exit | - | 退出服务器 |
@@ -288,7 +294,6 @@ switch
 next
 queue
 exit
-text
 ```
 
 ## 网络广播
@@ -329,15 +334,34 @@ info = json.loads(data.decode())
 print(f"发现音乐服务器: {info['name']} at {addr[0]}:{info['port']}")
 ```
 
+## 测试
+
+测试使用 JUnit 5（由 `spring-boot-starter-test` 提供），位于 `src/test/java/core/`。
+
+```
+mvn test
+```
+
+| 测试类 | 覆盖点 |
+| --- | --- |
+| PlaybackSessionTest | 四种播放模式的推进与环绕、队列增删清空、多线程并发访问不越界 |
+| PlaylistTest | 歌单增删的返回值语义、无实际变更时不刷新更新时间、musicIds 为 null 的兜底 |
+| PlaylistJsonTest | 歌单 JSON 序列化往返（含 LocalDateTime），守住歌单持久化修复 |
+| MetadataExtractorTest | 标签缺失时用「艺术家 - 标题」文件名兜底 |
+| Mp3DurationParserTest | CBR 时长估算、Xing(VBR) 头部解析、ID3v2 跳过、异常输入返回 0 |
+
+---
+
 ## 项目结构
 ```
 HelloMusic/
-├── src/main/java/com/
+├── src/main/java/core/
 │ ├── HelloMusicApplication.java
 │ ├── ConfigManager.java
 │ ├── MusicFile.java
 │ ├── MusicMetadata.java
 │ ├── MusicScannerService.java
+│ ├── MetadataExtractor.java
 │ ├── Mp3DurationParser.java
 │ ├── BroadcastService.java
 │ ├── MusicController.java
@@ -349,9 +373,12 @@ HelloMusic/
 │ ├── PlaybackService.java
 │ ├── PlaybackController.java
 │ └── CommandLineInterface.java
-├── src/main/resources/
-│ ├── application.properties
-│ └── banner.txt
+├── src/test/java/core/
+│ ├── PlaybackSessionTest.java
+│ ├── PlaylistTest.java
+│ ├── PlaylistJsonTest.java
+│ ├── MetadataExtractorTest.java
+│ └── Mp3DurationParserTest.java
 ├── pom.xml
 ├── README.md
 └── LICENSE
@@ -364,8 +391,10 @@ HelloMusic/
 | Java | 21 | 编程语言 |
 | Spring Boot | 3.2.0 | Web 框架 |
 | Apache Commons IO | 2.15.1 | 文件操作 |
+| Jaudiotagger | 3.0.1 | 音频元数据解析（MP3/FLAC/M4A/OGG/WAV） |
 | Jackson | 最新 | JSON 处理 |
 | Maven | 3.6+ | 构建工具 |
+| JUnit 5 | 随 Spring Boot 管理 | 单元测试 |
 
 
 ## 贡献指南
@@ -378,7 +407,27 @@ HelloMusic/
 
 ## 许可证
 
-本项目采用 GPL V3 许可证。
+本项目采用 **GNU General Public License v3.0（GPL-3.0）** 许可证，版权持有人（copyright holder）为 **Lu Jiafan**。完整条款见根目录 [LICENSE](LICENSE) 文件（该文件为 GPL-3.0 官方原文，未作任何修改）。
+
+```
+HelloMusic - Local music server with UDP broadcast and REST API
+Copyright (C) 2026 Lu Jiafan
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
+
+简单来说，你可以自由使用、修改和分发本项目，但**分发衍生作品时必须同样以 GPL-3.0 开源并提供源码**。
 
 ## 致谢
 

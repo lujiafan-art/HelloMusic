@@ -1,13 +1,40 @@
+/*
+ * HelloMusic - Local music server with UDP broadcast and REST API
+ * Copyright (C) 2026 Lu Jiafan
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package core;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
+/**
+ * 单个播放会话的状态：播放队列、当前下标与播放模式。
+ *
+ * <p><b>线程安全：</b>会话会被 CLI 线程与多个 HTTP 请求线程共享（{@code PlaybackService}
+ * 只有一个默认会话），因此这里所有公开方法都加了 {@code synchronized}，把「读下标 → 计算
+ * → 写下标」这类复合操作变成原子操作，避免并发调用 {@code next()/previous()/loadPlaylist()}
+ * 时出现下标错乱、重复播放或 {@code IndexOutOfBoundsException}。
+ * {@code playlist} 是普通 {@code ArrayList}，不允许在未持锁的情况下从外部遍历。</p>
+ */
 public class PlaybackSession {
-    private final List<String> playlist;        // 当前播放列表（歌曲ID列表）
-    private int currentIndex;                   // 当前播放位置
-    private PlayMode playMode;                  // 播放模式
+    private final List<String> playlist;
+    private int currentIndex;
+    private PlayMode playMode;
     private final Random random;
 
     public PlaybackSession() {
@@ -17,26 +44,22 @@ public class PlaybackSession {
         this.random = new Random();
     }
 
-    // 设置播放列表
-    public void setPlaylist(List<String> musicIds) {
+    public synchronized void setPlaylist(List<String> musicIds) {
         this.playlist.clear();
         this.playlist.addAll(musicIds);
         this.currentIndex = 0;
     }
 
-    // 添加歌曲到播放列表
-    public void addSong(String musicId) {
+    public synchronized void addSong(String musicId) {
         this.playlist.add(musicId);
     }
 
-    // 清空播放列表
-    public void clear() {
+    public synchronized void clear() {
         this.playlist.clear();
         this.currentIndex = 0;
     }
 
-    // 获取当前播放歌曲ID
-    public String getCurrentSong() {
+    public synchronized String getCurrentSong() {
         if (playlist.isEmpty()) {
             return null;
         }
@@ -46,31 +69,28 @@ public class PlaybackSession {
         return playlist.get(currentIndex);
     }
 
-    // 获取下一首歌曲ID
-    public String getNextSong() {
+    public synchronized String getNextSong() {
         if (playlist.isEmpty()) {
             return null;
         }
 
         switch (playMode) {
             case SINGLE:
-                // 单曲循环：返回当前歌曲
                 return getCurrentSong();
 
-            case SHUFFLE:
-                // 随机播放：随机选择一首
+            case SHUFFLE: {
                 if (playlist.size() == 1) {
                     return playlist.get(0);
                 }
                 int randomIndex;
                 do {
                     randomIndex = random.nextInt(playlist.size());
-                } while (randomIndex == currentIndex && playlist.size() > 1);
+                } while (randomIndex == currentIndex);
                 currentIndex = randomIndex;
                 return playlist.get(currentIndex);
+            }
 
             case REVERSE:
-                // 逆向播放
                 if (currentIndex <= 0) {
                     currentIndex = playlist.size() - 1;
                 } else {
@@ -80,7 +100,6 @@ public class PlaybackSession {
 
             case FORWARD:
             default:
-                // 正向播放
                 if (currentIndex >= playlist.size() - 1) {
                     currentIndex = 0;
                 } else {
@@ -90,21 +109,17 @@ public class PlaybackSession {
         }
     }
 
-    // 获取上一首歌曲ID
-    public String getPreviousSong() {
+    public synchronized String getPreviousSong() {
         if (playlist.isEmpty()) {
             return null;
         }
 
         switch (playMode) {
             case SINGLE:
-                return getCurrentSong();
-
             case SHUFFLE:
                 return getCurrentSong();
 
             case REVERSE:
-                // 逆向模式下，上一首 = 正向的下一首
                 if (currentIndex >= playlist.size() - 1) {
                     currentIndex = 0;
                 } else {
@@ -123,71 +138,34 @@ public class PlaybackSession {
         }
     }
 
-    // 跳转到指定位置
-    public boolean seekTo(int index) {
-        if (index < 0 || index >= playlist.size()) {
-            return false;
-        }
-        this.currentIndex = index;
-        return true;
-    }
-
-    // 跳转到指定歌曲
-    public boolean seekToSong(String musicId) {
-        int index = playlist.indexOf(musicId);
-        if (index < 0) {
-            return false;
-        }
-        this.currentIndex = index;
-        return true;
-    }
-
-    // 获取当前播放位置
-    public int getCurrentIndex() {
+    public synchronized int getCurrentIndex() {
         return currentIndex;
     }
 
-    // 获取播放列表大小
-    public int getSize() {
+    public synchronized int getSize() {
         return playlist.size();
     }
 
-    // 判断是否为空
-    public boolean isEmpty() {
+    public synchronized boolean isEmpty() {
         return playlist.isEmpty();
     }
 
-    // 获取当前播放模式
-    public PlayMode getPlayMode() {
+    public synchronized PlayMode getPlayMode() {
         return playMode;
     }
 
-    // 设置播放模式
-    public void setPlayMode(PlayMode playMode) {
+    public synchronized void setPlayMode(PlayMode playMode) {
         this.playMode = playMode;
     }
 
-    // 切换播放模式（循环切换）
-    public PlayMode nextPlayMode() {
+    public synchronized PlayMode nextPlayMode() {
         PlayMode[] modes = PlayMode.values();
         int nextOrdinal = (playMode.ordinal() + 1) % modes.length;
         this.playMode = modes[nextOrdinal];
         return this.playMode;
     }
 
-    // 获取当前播放列表（只读）
-    public List<String> getPlaylist() {
+    public synchronized List<String> getPlaylist() {
         return new ArrayList<>(playlist);
-    }
-
-    // 是否到达列表末尾
-    public boolean isEndOfList() {
-        if (playlist.isEmpty()) {
-            return true;
-        }
-        if (playMode == PlayMode.SINGLE || playMode == PlayMode.SHUFFLE) {
-            return false;
-        }
-        return currentIndex >= playlist.size() - 1;
     }
 }

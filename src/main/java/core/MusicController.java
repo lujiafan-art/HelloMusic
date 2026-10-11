@@ -1,10 +1,29 @@
+/*
+ * HelloMusic - Local music server with UDP broadcast and REST API
+ * Copyright (C) 2026 Lu Jiafan
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package core;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.task.TaskExecutor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.core.io.InputStreamResource;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.File;
@@ -23,19 +42,17 @@ public class MusicController {
     private final MusicScannerService scannerService;
     private final BroadcastService broadcastService;
     private final ConfigManager configManager;
+    private final TaskExecutor taskExecutor;
 
     @Autowired
     public MusicController(MusicScannerService scannerService,
                           BroadcastService broadcastService,
-                          ConfigManager configManager) {
+                          ConfigManager configManager,
+                          TaskExecutor taskExecutor) {
         this.scannerService = scannerService;
         this.broadcastService = broadcastService;
         this.configManager = configManager;
-        updateBroadcastStats();
-    }
-
-    private void updateBroadcastStats() {
-        broadcastService.updateLibrarySize(scannerService.getLibrarySize());
+        this.taskExecutor = taskExecutor;
     }
 
     @GetMapping("/music")
@@ -83,10 +100,9 @@ public class MusicController {
 
     @PostMapping("/scan")
     public ResponseEntity<Map<String, String>> triggerScan() {
-        new Thread(() -> {
-            scannerService.scanLibrary();
-            updateBroadcastStats();
-        }).start();
+        // 交给 Spring 托管的线程池执行，避免裸建线程且便于统一管理
+        // 广播中的库大小由 BroadcastService 动态读取，无需在此回写
+        taskExecutor.execute(scannerService::scanLibrary);
         return ResponseEntity.ok(Map.of("status", "Scan started"));
     }
 
@@ -135,7 +151,12 @@ public class MusicController {
                     ? Long.parseLong(parts[1])
                     : fileLength - 1;
 
-            if (start >= fileLength || end >= fileLength || start > end) {
+            // 兼容部分播放器发送的超界 Range：把 end 收敛到文件末尾，而不是直接返回 416
+            if (end >= fileLength) {
+                end = fileLength - 1;
+            }
+
+            if (start < 0 || start >= fileLength || start > end) {
                 return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
                         .header("Content-Range", "bytes */" + fileLength)
                         .build();
@@ -179,6 +200,11 @@ public class MusicController {
                     .header("X-File-Name", musicFile.getFileName())
                     .body(new InputStreamResource(limitedStream));
 
+        } catch (NumberFormatException e) {
+            // 无法解析的 Range 头，按 RFC 7233 返回 416
+            return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                    .header("Content-Range", "bytes */" + fileLength)
+                    .build();
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
@@ -198,8 +224,9 @@ public class MusicController {
     @PutMapping("/config")
     public ResponseEntity<ConfigManager.Config> updateConfig(@RequestBody ConfigManager.Config config) {
         configManager.setConfig(config);
-        scannerService.scanLibrary();
-        updateBroadcastStats();
+        // 配置变更后需要重新扫描，但扫描可能耗时数分钟。
+        // 放到线程池异步执行，避免 HTTP 请求被扫描阻塞直至超时。
+        taskExecutor.execute(scannerService::scanLibrary);
         return ResponseEntity.ok(configManager.getConfig());
     }
 

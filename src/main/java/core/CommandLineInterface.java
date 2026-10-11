@@ -1,3 +1,21 @@
+/*
+ * HelloMusic - Local music server with UDP broadcast and REST API
+ * Copyright (C) 2026 Lu Jiafan
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package core;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -421,7 +439,7 @@ public class CommandLineInterface implements CommandLineRunner {
         if (added) {
             System.out.println("✅ Song added to playlist.");
         } else {
-            System.out.println("❌ Failed to add song. Check playlist ID and music ID.");
+            System.out.println("❌ 未添加：歌单或歌曲不存在，或该歌曲已在歌单中。");
         }
     }
 
@@ -441,7 +459,7 @@ public class CommandLineInterface implements CommandLineRunner {
         if (removed) {
             System.out.println("✅ Song removed from playlist.");
         } else {
-            System.out.println("❌ Failed to remove song. Check playlist ID and music ID.");
+            System.out.println("❌ 未移除：歌单不存在，或该歌曲不在歌单中。");
         }
     }
 

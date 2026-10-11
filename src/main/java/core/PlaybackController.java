@@ -1,3 +1,21 @@
+/*
+ * HelloMusic - Local music server with UDP broadcast and REST API
+ * Copyright (C) 2026 Lu Jiafan
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package core;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -101,6 +119,15 @@ public class PlaybackController {
             return ResponseEntity.badRequest().body(Map.of("error", "音乐列表不能为空"));
         }
         playbackService.loadPlaylist(musicIds);
+        return ResponseEntity.ok(Map.of("status", "loaded", "total", playbackService.getQueue().size()));
+    }
+
+    // 加载歌单到播放队列（根据歌单 ID）
+    @PostMapping("/load/playlist/{id}")
+    public ResponseEntity<Map<String, Object>> loadPlaylistById(@PathVariable String id) {
+        if (!playbackService.loadPlaylistById(id)) {
+            return ResponseEntity.badRequest().body(Map.of("error", "歌单不存在或为空"));
+        }
         return ResponseEntity.ok(Map.of("status", "loaded", "total", playbackService.getQueue().size()));
     }
 

@@ -1,13 +1,30 @@
+/*
+ * HelloMusic - Local music server with UDP broadcast and REST API
+ * Copyright (C) 2026 Lu Jiafan
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package core;
 
+import jakarta.annotation.PostConstruct;
 import org.apache.commons.io.FilenameUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -16,25 +33,41 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 @Service
 public class MusicScannerService {
-    private final Map<String, MusicFile> musicLibrary = new ConcurrentHashMap<>();
+    // volatile 引用：扫描完成后一次性原子换引用，避免 clear()+putAll() 之间的空库窗口
+    private volatile Map<String, MusicFile> musicLibrary = new ConcurrentHashMap<>();
     private final ConfigManager configManager;
-    private boolean scanning = false;
-    private long lastScanTime = 0;
+    // 原子标志：多个触发源（启动 / @Scheduled / REST /scan / CLI scan）可能并发调用
+    private final AtomicBoolean scanning = new AtomicBoolean(false);
+    private volatile long lastScanTime = 0;
 
     @Autowired
     public MusicScannerService(ConfigManager configManager) {
         this.configManager = configManager;
+    }
+
+    /**
+     * 应用启动时同步执行一次初始扫描。
+     * 放在 @PostConstruct 而不是构造器里：此时依赖已注入、Bean 已构建完毕，
+     * 既避免在构造期间做重活，也保证启动后音乐库立刻可用。
+     * 后续刷新交给下面的 @Scheduled 定时任务。
+     */
+    @PostConstruct
+    public void initScan() {
         scanLibrary();
     }
 
-    @Scheduled(initialDelay = 60000, fixedDelay = 300000)
+    @Scheduled(initialDelay = 300000, fixedDelay = 300000)
     public void scanLibrary() {
-        if (scanning) return;
-        scanning = true;
+        // CAS 抢占：只有一个线程能把 false 翻转为 true，其余直接返回
+        if (!scanning.compareAndSet(false, true)) {
+            System.out.println("⏭ 已有扫描任务在执行，跳过本次触发");
+            return;
+        }
 
         try {
             System.out.println("🔍 Starting music library scan...");
@@ -54,8 +87,8 @@ public class MusicScannerService {
                 }
             }
 
-            musicLibrary.clear();
-            musicLibrary.putAll(newLibrary);
+            // 一次性原子换引用：读者要么看到旧库，要么看到新库，绝不会看到半空状态
+            musicLibrary = newLibrary;
             lastScanTime = System.currentTimeMillis();
 
             long duration = (System.currentTimeMillis() - startTime) / 1000;
@@ -63,7 +96,7 @@ public class MusicScannerService {
         } catch (Exception e) {
             System.err.println("❌ Error scanning library: " + e.getMessage());
         } finally {
-            scanning = false;
+            scanning.set(false);
         }
     }
 
@@ -113,16 +146,11 @@ public class MusicScannerService {
 
             musicFile.setUrl("/api/stream/" + id);
 
-            // 提取 MP3 元数据和时长
-            if (extension.equalsIgnoreCase("mp3")) {
-                try {
-                    MusicMetadata metadata = extractMp3Metadata(file);
-                    int duration = Mp3DurationParser.getDuration(file);
-                    metadata.setDuration(duration);
-                    musicFile.setMetadata(metadata);
-                } catch (Exception e) {
-                    // Metadata extraction failed
-                }
+            // 提取元数据与时长（Jaudiotagger，覆盖 mp3/flac/m4a/ogg/wav 等；失败自动兜底）
+            try {
+                musicFile.setMetadata(MetadataExtractor.extract(file));
+            } catch (Exception e) {
+                // 单个文件元数据解析失败不影响其入库
             }
 
             return musicFile;
@@ -130,97 +158,6 @@ public class MusicScannerService {
             return null;
         }
     }
-
-    private MusicMetadata extractMp3Metadata(File file) throws IOException {
-        MusicMetadata metadata = new MusicMetadata();
-
-        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
-            long fileLength = raf.length();
-
-            if (fileLength >= 128) {
-                raf.seek(fileLength - 128);
-                byte[] tagBytes = new byte[128];
-                raf.readFully(tagBytes);
-
-                String tagHeader = new String(tagBytes, 0, 3, StandardCharsets.ISO_8859_1);
-                if ("TAG".equals(tagHeader)) {
-                    String title = new String(tagBytes, 3, 30, StandardCharsets.ISO_8859_1).trim();
-                    metadata.setTitle(title.isEmpty() ? "Unknown Title" : title);
-
-                    String artist = new String(tagBytes, 33, 30, StandardCharsets.ISO_8859_1).trim();
-                    metadata.setArtist(artist.isEmpty() ? "Unknown Artist" : artist);
-
-                    String album = new String(tagBytes, 63, 30, StandardCharsets.ISO_8859_1).trim();
-                    metadata.setAlbum(album.isEmpty() ? "Unknown Album" : album);
-
-                    String yearStr = new String(tagBytes, 93, 4, StandardCharsets.ISO_8859_1).trim();
-                    if (!yearStr.isEmpty()) {
-                        try {
-                            metadata.setYear(Integer.parseInt(yearStr));
-                        } catch (NumberFormatException ignored) {}
-                    }
-
-                    String comment = new String(tagBytes, 97, 30, StandardCharsets.ISO_8859_1).trim();
-                    metadata.setComment(comment);
-
-                    int genreCode = tagBytes[127] & 0xFF;
-                    if (genreCode < ID3_GENRES.length) {
-                        metadata.setGenre(ID3_GENRES[genreCode]);
-                    } else {
-                        metadata.setGenre("Unknown Genre");
-                    }
-                } else {
-                    // 没有 ID3v1 标签，从文件名解析
-                    parseFileName(file, metadata);
-                }
-            } else {
-                parseFileName(file, metadata);
-            }
-        }
-
-        return metadata;
-    }
-
-    /**
-     * 从文件名解析「艺术家 - 歌曲名」格式
-     */
-    private void parseFileName(File file, MusicMetadata metadata) {
-        String fileName = file.getName();
-        int extIndex = fileName.lastIndexOf('.');
-        String baseName = extIndex > 0 ? fileName.substring(0, extIndex) : fileName;
-
-        String[] parts = baseName.split(" - ");
-        if (parts.length >= 2) {
-            metadata.setArtist(parts[0].trim());
-            metadata.setTitle(parts[1].trim());
-        } else {
-            metadata.setTitle(baseName);
-            metadata.setArtist("Unknown Artist");
-        }
-        metadata.setAlbum("Unknown Album");
-        metadata.setGenre("Unknown Genre");
-    }
-
-    private static final String[] ID3_GENRES = {
-            "Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk", "Grunge", "Hip-Hop",
-            "Jazz", "Metal", "New Age", "Oldies", "Other", "Pop", "R&B", "Rap", "Reggae", "Rock",
-            "Techno", "Industrial", "Alternative", "Ska", "Death Metal", "Pranks", "Soundtrack",
-            "Euro-Techno", "Ambient", "Trip-Hop", "Vocal", "Jazz+Funk", "Fusion", "Trance",
-            "Classical", "Instrumental", "Acid", "House", "Game", "Sound Clip", "Gospel", "Noise",
-            "Alternative Rock", "Bass", "Soul", "Punk", "Space", "Meditative", "Instrumental Pop",
-            "Instrumental Rock", "Ethnic", "Gothic", "Darkwave", "Techno-Industrial", "Electronic",
-            "Pop-Folk", "Eurodance", "Dream", "Southern Rock", "Comedy", "Cult", "Gangsta",
-            "Top 40", "Christian Rap", "Pop/Funk", "Jungle", "Native American", "Cabaret",
-            "New Wave", "Psychadelic", "Rave", "Showtunes", "Trailer", "Lo-Fi", "Tribal",
-            "Acid Punk", "Acid Jazz", "Polka", "Retro", "Musical", "Rock & Roll", "Hard Rock",
-            "Folk", "Folk/Rock", "National Folk", "Swing", "Fast Fusion", "Bebop", "Latin",
-            "Revival", "Celtic", "Bluegrass", "Avantgarde", "Gothic Rock", "Progressive Rock",
-            "Psychedelic Rock", "Symphonic Rock", "Slow Rock", "Big Band", "Chorus", "Easy Listening",
-            "Acoustic", "Humour", "Speech", "Chanson", "Opera", "Chamber Music", "Sonata",
-            "Symphony", "Booty Bass", "Primus", "Porn Groove", "Satire", "Slow Jam", "Club",
-            "Tango", "Samba", "Folklore", "Ballad", "Power Ballad", "Rhythmic Soul", "Freestyle",
-            "Duet", "Punk Rock", "Drum Solo", "Acapella", "Euro-House", "Dance Hall"
-    };
 
     public List<MusicFile> getAllMusic() {
         return new ArrayList<>(musicLibrary.values());
@@ -232,7 +169,8 @@ public class MusicScannerService {
 
     public List<MusicFile> searchMusic(String query) {
         String lowerQuery = query.toLowerCase();
-        return musicLibrary.values().stream()
+        Map<String, MusicFile> snapshot = musicLibrary;
+        return snapshot.values().stream()
                 .filter(file -> {
                     String fileName = file.getFileName().toLowerCase();
                     MusicMetadata metadata = file.getMetadata();
@@ -248,7 +186,8 @@ public class MusicScannerService {
     }
 
     public List<MusicFile> getMusicByArtist(String artist) {
-        return musicLibrary.values().stream()
+        Map<String, MusicFile> snapshot = musicLibrary;
+        return snapshot.values().stream()
                 .filter(file -> {
                     MusicMetadata metadata = file.getMetadata();
                     return metadata != null &&
@@ -259,7 +198,8 @@ public class MusicScannerService {
     }
 
     public Map<String, List<MusicFile>> getArtists() {
-        return musicLibrary.values().stream()
+        Map<String, MusicFile> snapshot = musicLibrary;
+        return snapshot.values().stream()
                 .filter(file -> file.getMetadata() != null && file.getMetadata().getArtist() != null)
                 .filter(file -> !file.getMetadata().getArtist().equals("Unknown Artist"))
                 .collect(Collectors.groupingBy(
@@ -273,7 +213,7 @@ public class MusicScannerService {
     }
 
     public boolean isScanning() {
-        return scanning;
+        return scanning.get();
     }
 
     public long getLastScanTime() {

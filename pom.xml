@@ -11,7 +11,15 @@
     <packaging>jar</packaging>
 
     <name>HelloMusic</name>
-    <description>Local music server with TCP broadcast and REST API</description>
+    <description>Local music server with UDP broadcast and REST API</description>
+
+    <licenses>
+        <license>
+            <name>GNU General Public License v3.0</name>
+            <url>https://www.gnu.org/licenses/gpl-3.0.html</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
 
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
@@ -42,16 +50,16 @@
             <version>2.15.1</version>
         </dependency>
 
+        <!-- 音频元数据解析：MP3(ID3v1/v2, 支持中文 UTF-8/GBK)、FLAC、M4A/MP4、OGG、WAV 等 -->
         <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
+            <groupId>net.jthink</groupId>
+            <artifactId>jaudiotagger</artifactId>
+            <version>3.0.1</version>
         </dependency>
 
         <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <version>1.18.30</version>
-            <scope>provided</scope>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
         </dependency>
 
         <dependency>

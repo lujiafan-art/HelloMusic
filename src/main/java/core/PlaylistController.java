@@ -1,6 +1,25 @@
+/*
+ * HelloMusic - Local music server with UDP broadcast and REST API
+ * Copyright (C) 2026 Lu Jiafan
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package core;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -77,7 +96,8 @@ public class PlaylistController {
             @RequestParam String musicId) {
         boolean added = playlistService.addSongToPlaylist(id, musicId);
         if (!added) {
-            return ResponseEntity.badRequest().build();
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "歌单或歌曲不存在，或该歌曲已在歌单中"));
         }
         return ResponseEntity.ok(Map.of("status", "Added"));
     }
@@ -101,7 +121,10 @@ public class PlaylistController {
             @PathVariable String musicId) {
         boolean removed = playlistService.removeSongFromPlaylist(id, musicId);
         if (!removed) {
-            return ResponseEntity.notFound().build();
+            // 注意：ResponseEntity.notFound() 返回的是 HeadersBuilder<Void>，没有 body() 方法，
+            // 需要带响应体时必须用 status(HttpStatus) 拿到 BodyBuilder
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("error", "歌单不存在，或该歌曲不在歌单中"));
         }
         return ResponseEntity.ok(Map.of("status", "Removed"));
     }

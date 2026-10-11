@@ -1,3 +1,21 @@
+/*
+ * HelloMusic - Local music server with UDP broadcast and REST API
+ * Copyright (C) 2026 Lu Jiafan
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package core;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,10 +36,19 @@ public class PlaylistService {
     private static final String PLAYLIST_FILE = "playlists.json";
     private final ObjectMapper objectMapper;
 
+    /**
+     * 注入 Spring 托管的 {@link ObjectMapper}，而不是自行 {@code new ObjectMapper()}。
+     *
+     * <p>Playlist 含 {@code LocalDateTime} 字段，而裸 ObjectMapper 未注册 JavaTimeModule，
+     * Jackson 2.12+ 会直接抛 {@code InvalidDefinitionException}（
+     * "Java 8 date/time type java.time.LocalDateTime not supported by default"）。
+     * 该异常属于 IOException，会被下面的 catch 静默吞掉，导致 playlists.json 既写不进也读不出。
+     * Spring Boot 自动配置的 ObjectMapper 已注册 jsr310 模块，可正确序列化。</p>
+     */
     @Autowired
-    public PlaylistService(MusicScannerService scannerService) {
+    public PlaylistService(MusicScannerService scannerService, ObjectMapper objectMapper) {
         this.scannerService = scannerService;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
         loadPlaylists();
     }
 
@@ -56,6 +83,11 @@ public class PlaylistService {
     // 获取所有播放列表
     public List<Playlist> getAllPlaylists() {
         return new ArrayList<>(playlists.values());
+    }
+
+    // 按 ID 获取播放列表原始对象（供加载到播放队列等内部逻辑使用）
+    public Playlist getPlaylist(String id) {
+        return playlists.get(id);
     }
 
     // 获取播放列表（含歌曲详情）
@@ -119,7 +151,12 @@ public class PlaylistService {
         return false;
     }
 
-    // 添加歌曲到播放列表
+    /**
+     * 添加歌曲到播放列表。
+     *
+     * @return 仅在本次确实新增了歌曲时返回 {@code true}；
+     *         歌单不存在、歌曲不存在、或歌曲已在歌单中，均返回 {@code false}
+     */
     public boolean addSongToPlaylist(String playlistId, String musicId) {
         Playlist playlist = playlists.get(playlistId);
         if (playlist == null) {
@@ -129,12 +166,19 @@ public class PlaylistService {
         if (scannerService.getMusicById(musicId).isEmpty()) {
             return false;
         }
-        playlist.addMusic(musicId);
+        if (!playlist.addMusic(musicId)) {
+            // 已在歌单中，无需落盘
+            return false;
+        }
         savePlaylists();
         return true;
     }
 
-    // 批量添加歌曲
+    /**
+     * 批量添加歌曲。
+     *
+     * @return 实际新增的歌曲数量（已存在或音乐库里没有的不会计入）
+     */
     public int addSongsToPlaylist(String playlistId, List<String> musicIds) {
         Playlist playlist = playlists.get(playlistId);
         if (playlist == null) {
@@ -142,8 +186,7 @@ public class PlaylistService {
         }
         int added = 0;
         for (String musicId : musicIds) {
-            if (scannerService.getMusicById(musicId).isPresent()) {
-                playlist.addMusic(musicId);
+            if (scannerService.getMusicById(musicId).isPresent() && playlist.addMusic(musicId)) {
                 added++;
             }
         }
@@ -153,13 +196,20 @@ public class PlaylistService {
         return added;
     }
 
-    // 从播放列表移除歌曲
+    /**
+     * 从播放列表移除歌曲。
+     *
+     * @return 仅在歌曲原本存在于歌单中并成功移除时返回 {@code true}
+     */
     public boolean removeSongFromPlaylist(String playlistId, String musicId) {
         Playlist playlist = playlists.get(playlistId);
         if (playlist == null) {
             return false;
         }
-        playlist.removeMusic(musicId);
+        if (!playlist.removeMusic(musicId)) {
+            // 歌单中原本就没有这首，无需落盘
+            return false;
+        }
         savePlaylists();
         return true;
     }
