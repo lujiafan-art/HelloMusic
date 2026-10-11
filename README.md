@@ -1,31 +1,36 @@
 # HelloMusic - 本地音乐服务器
 
-[![Java](https://img.shields.io/badge/Java-21-007396?logo=java&logoColor=white)](https://adoptium.net/)
+[![Java](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)](https://adoptium.net/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2.0-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
 [![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://makeapullrequest.com)
 [![AI Generated](https://img.shields.io/badge/AI-Generated-8A2BE2?logo=openai&logoColor=white)](https://github.com)
 
-> 本项目由 AI 辅助生成 - 基于深度求索（DeepSeek）AI 模型，通过自然语言对话完成完整项目开发
+> 本项目由 AI 辅助生成 —— 基于深度求索（DeepSeek）AI 模型，通过自然语言对话完成完整项目开发。
 
-一个轻量级的本地音乐服务器，支持 UDP 广播发现、REST API、播放列表、播放控制和命令行界面。让你的音乐在局域网中随时可用。
+扫描本机的音乐目录，提取标签与时长，在局域网里用 UDP 广播自我通告，并对外提供一套 REST API 与一个交互式 CLI。没有数据库、没有前端构建、没有外部服务依赖，`java -jar` 一条命令就能跑起来。
 
 ---
 
 ## 目录
 
 - [特性](#特性)
+- [环境要求](#环境要求)
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
-- [API文档](#api文档)
-- [播放控制](#播放控制)
 - [命令行界面](#命令行界面)
+- [REST API](#rest-api)
 - [网络广播](#网络广播)
-- [测试](#测试)
+- [播放模式](#播放模式)
+- [运行时文件](#运行时文件)
 - [项目结构](#项目结构)
 - [技术栈](#技术栈)
+- [开发与测试](#开发与测试)
+- [常见问题](#常见问题)
+- [安全提示](#安全提示)
 - [贡献指南](#贡献指南)
 - [许可证](#许可证)
+- [致谢](#致谢)
 
 ---
 
@@ -33,381 +38,520 @@
 
 | 功能 | 说明 |
 | --- | --- |
-| 自动扫描 | 扫描指定目录下的音乐文件，支持 MP3、MKV、FLAC、WAV、M4A、OGG |
-| 元数据提取 | 基于 Jaudiotagger 提取 MP3(ID3v1/v2)、FLAC、M4A、OGG、WAV 的标签（标题、艺术家、专辑、年份、流派、音轨号），支持 UTF-8/GBK 中文标签 |
-| 时长解析 | 读取各格式音频的时长与比特率（MP3 额外提供纯 Java 解析兜底） |
-| 网络广播 | 通过 UDP 广播在局域网中自动发现服务，无需手动输入 IP |
-| REST API | 完整的 RESTful API，支持跨域 (CORS)，可对接任何前端 |
-| 播放列表 | 创建、管理、保存播放列表，数据持久化到 JSON 文件 |
-| 播放控制 | 正向播放、逆向播放、单曲循环、随机播放，支持切换 |
-| 播放队列 | 管理播放队列，支持添加、清空、查看队列状态 |
-| 配置持久化 | 自动保存播放模式等配置，重启不丢失 |
-| 命令行界面 | 交互式 CLI，方便服务器管理 |
-| 流式播放 | 支持音乐流式传输，可直接在浏览器中播放 |
-| 自动更新 | 定时扫描音乐库，自动发现新增文件 |
+| 自动扫描 | 递归扫描配置的音乐库目录，按扩展名过滤（默认 MP3、FLAC、WAV、M4A、OGG、MKV） |
+| 稳定 ID | 用文件绝对路径生成 UUID（`nameUUIDFromBytes`），重启或重新扫描后 ID 不变 |
+| 元数据提取 | 基于 jaudiotagger 读取标题、艺术家、专辑、流派、音轨号、年份，支持中文标签（UTF-8/GBK） |
+| 元数据兜底 | 无标签或解析失败时回退为「艺术家 - 标题」文件名解析，字段填充 `Unknown Title/Artist/Album/Genre` |
+| 时长解析 | 优先取标签时长；MP3 额外提供纯 Java 解析兜底，支持 CBR 估算与 Xing/Info、VBRI（VBR）头部 |
+| 流式播放 | `/api/stream/{id}` 支持 HTTP Range，可拖动进度条，返回 `206 Partial Content` |
+| 网络广播 | UDP 广播自我通告，同时发往 `255.255.255.255` 与本机子网广播地址 |
+| REST API | 音乐库、歌单、播放控制、系统管理四组接口，JSON 响应 |
+| 播放列表 | 创建/改名/删除歌单，增删歌曲、批量添加、重排序，持久化到 `playlists.json` |
+| 播放控制 | 正向、逆向、单曲循环、随机四种模式，可切换并自动持久化 |
+| 播放队列 | 全部音乐入队、按歌单入队、单曲/批量追加、清空、查看队列状态 |
+| 配置持久化 | 配置与上次播放模式写入 `hellomusic-config.json`，重启不丢 |
+| 交互式 CLI | 27 个命令，覆盖扫描、歌单、播放控制与配置管理 |
+| 定时刷新 | 启动时同步扫描一次，之后每 5 分钟自动重扫 |
+
+---
+
+## 环境要求
+
+| 依赖 | 版本 | 说明 |
+| --- | --- | --- |
+| JDK | 21+ | `pom.xml` 中 `maven.compiler.release=21`，低版本无法编译 |
+| Maven | 3.6+ | 构建与测试 |
 
 ---
 
 ## 快速开始
 
-### 前提条件
-
-| 依赖 | 版本 | 说明 |
-| --- | --- | --- |
-| Java | 21 | 下载地址：https://adoptium.net/ |
-| Maven | 3.6+ | 下载地址：https://maven.apache.org/ |
-
-### 安装步骤
-```
+```bash
 git clone https://github.com/lujiafan-art/HelloMusic.git
 cd HelloMusic
 mvn clean package
 java -jar target/HelloMusic.jar
 ```
 
-## 配置说明
+启动后终端会打印横幅，并进入 CLI（提示符 `🎵>`）：
 
-首次运行会自动生成 `hellomusic-config.json` 配置文件。
 ```
-{
-"musicLibraryPaths": ["/home/username/Music"],
-"serverPort": 8080,
-"broadcastPort": 9999,
-"broadcastInterval": 30000,
-"supportedExtensions": ["mp3", "mkv", "flac", "wav", "m4a", "ogg"],
-"serverName": "HelloMusic",
-"lastPlayMode": "FORWARD"
-}
+╔═══════════════════════════════════════════╗
+║       HelloMusic Server Started           ║
+║                                           ║
+║  API: http://localhost:8080/api           ║
+║  CLI: Type 'help' in console              ║
+║  Broadcast: UDP 9999                      ║
+╚═══════════════════════════════════════════╝
 ```
 
-### 配置参数说明
+**首次启动会自动完成三件事**：
 
-| 参数 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| musicLibraryPaths | String[] | ["~/Music"] | 音乐库目录路径列表 |
-| serverPort | int | 8080 | HTTP 服务端口（修改后需重启生效） |
-| broadcastPort | int | 9999 | UDP 广播端口 |
-| broadcastInterval | int | 30000 | 广播间隔（毫秒） |
-| supportedExtensions | String[] | ["mp3","mkv","flac","wav","m4a","ogg"] | 支持的文件扩展名 |
-| serverName | String | "HelloMusic" | 服务器名称 |
-| lastPlayMode | String | "FORWARD" | 上次播放模式（自动保存） |
+1. 在当前工作目录生成 `hellomusic-config.json`，音乐库默认指向 `~/Music`；
+2. 立即扫描一次音乐库（同步执行，库很大时启动会慢一些，日志会打印文件数与耗时）；
+3. 拉起 HTTP 服务（默认 8080）与 UDP 广播（默认 9999 / 每 30 秒一次）。
 
-### 修改配置
+> ⚠️ **务必固定在同一目录启动。** 配置与歌单文件是相对**当前工作目录**（不是 classpath）读写的。在 A 目录启动过、又切到 B 目录启动，看起来就像"配置和歌单全丢了"。
 
-方式一：直接编辑配置文件
+### 在浏览器里播放
+
+拿到歌曲 ID 后直接丢给 `<audio>` 即可，`Range` 已支持，进度条可以拖：
+
+```html
+<audio controls src="http://localhost:8080/api/stream/替换成你的歌曲ID"></audio>
 ```
-vim hellomusic-config.json
-```
-
-方式二：通过 API 更新
-```
-curl -X PUT http://localhost:8080/api/config -H "Content-Type: application/json" -d '{"musicLibraryPaths":["/new/path/to/music"]}'
-```
-
-方式三：通过 CLI 命令
-```
-addpath /new/path/to/music
-scan
-```
-## API文档
-
-### 基础信息
-
-| 项目 | 说明 |
-| --- | --- |
-| Base URL | http://localhost:8080/api |
-| 响应格式 | JSON |
-| CORS | 支持所有来源 |
-
-### 音乐管理
-
-| 方法 | 端点 | 描述 |
-| --- | --- | --- |
-| GET | /api/music | 获取所有音乐 |
-| GET | /api/music/{id} | 获取单个音乐 |
-| GET | /api/music/search?q={query} | 搜索音乐 |
-| GET | /api/music/artist/{artist} | 按艺术家获取 |
-| GET | /api/artists | 获取所有艺术家 |
-| GET | /api/stream/{id} | 流式播放音乐 |
-| POST | /api/scan | 触发扫描 |
-
-### 播放列表管理
-
-| 方法 | 端点 | 描述 |
-| --- | --- | --- |
-| GET | /api/playlists | 获取所有播放列表 |
-| GET | /api/playlists/{id} | 获取播放列表详情 |
-| POST | /api/playlists?name= | 创建播放列表 |
-| PUT | /api/playlists/{id} | 更新播放列表 |
-| DELETE | /api/playlists/{id} | 删除播放列表 |
-| POST | /api/playlists/{id}/songs?musicId= | 添加歌曲到播放列表 |
-| POST | /api/playlists/{id}/songs/batch | 批量添加歌曲 |
-| DELETE | /api/playlists/{id}/songs/{musicId} | 从播放列表移除歌曲 |
-| DELETE | /api/playlists/{id}/clear | 清空播放列表 |
-| PUT | /api/playlists/{id}/reorder | 重排序播放列表 |
-
-### 播放控制
-
-| 方法 | 端点 | 描述 |
-| --- | --- | --- |
-| GET | /api/playback/mode | 获取当前播放模式 |
-| POST | /api/playback/mode/switch | 切换播放模式 |
-| POST | /api/playback/mode?mode=xxx | 设置播放模式 |
-| GET | /api/playback/current | 获取当前播放歌曲 |
-| POST | /api/playback/next | 下一首 |
-| POST | /api/playback/previous | 上一首 |
-| POST | /api/playback/load/all | 加载全部音乐到队列 |
-| POST | /api/playback/load | 加载指定列表到队列 |
-| POST | /api/playback/load/playlist/{id} | 加载歌单到队列 |
-| GET | /api/playback/queue | 获取播放队列信息 |
-| DELETE | /api/playback/queue | 清空播放队列 |
-| POST | /api/playback/queue/add?musicId= | 添加歌曲到队列 |
-| POST | /api/playback/queue/add/batch | 批量添加到队列 |
-
-### 系统管理
-
-| 方法 | 端点 | 描述 |
-| --- | --- | --- |
-| GET | /api/stats | 获取服务器统计 |
-| GET | /api/config | 获取配置 |
-| PUT | /api/config | 更新配置 |
-| GET | /api/info | 获取服务器信息 |
-| POST | /api/broadcast | 发送广播 |
-
-### 路径参数
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| id | String | 音乐/播放列表的唯一标识符 |
-| musicId | String | 音乐文件的唯一标识符 |
-| playlistId | String | 播放列表的唯一标识符 |
-
-### 查询参数
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| q | String | 是 | 搜索关键词 |
-| name | String | 是 | 播放列表名称 |
-| mode | String | 是 | 播放模式：FORWARD/REVERSE/SINGLE/SHUFFLE |
 
 ---
 
-## 播放控制
+## 配置说明
 
-### 播放模式
+配置文件为当前工作目录下的 `hellomusic-config.json`，首次启动自动生成：
 
-| 模式 | 说明 |
-| --- | --- |
-| FORWARD | 正向播放（顺序播放，到末尾回到开头） |
-| REVERSE | 逆向播放（从后往前播放） |
-| SINGLE | 单曲循环（重复播放当前歌曲） |
-| SHUFFLE | 随机播放（随机选择下一首） |
-
-### 使用示例
-
-```
-查看当前播放模式
-mode
-
-切换播放模式
-switch
-
-加载全部音乐到播放队列
-loadall
-
-下一首
-next
-
-上一首
-prev
-
-查看播放队列信息
-queue
-
-清空播放队列
-clearqueue
-```
-
-### 通过 API
-切换为随机播放
-```
-curl -X POST "http://localhost:8080/api/playback/mode?mode=SHUFFLE"
-```
-获取当前播放歌曲
-```
-curl http://localhost:8080/api/playback/current
-```
-下一首
-```
-curl -X POST http://localhost:8080/api/playback/next
-```
-
-## 命令行界面
-
-启动服务器后，可以在终端中使用交互式 CLI。
-
-### 命令列表
-| 命令 | 参数 | 说明 |
-| --- | --- | --- |
-| help | - | 显示帮助信息 |
-| list | [count] | 列出音乐文件 |
-| search | query | 搜索音乐 |
-| artists | - | 列出所有艺术家 |
-| stats | - | 显示服务器统计信息 |
-| scan | - | 手动触发库扫描 |
-| broadcast | - | 手动发送广播 |
-| config | - | 显示当前配置 |
-| addpath | path | 添加音乐库路径 |
-| removepath | index | 移除音乐库路径 |
-| playlists | - | 列出所有播放列表 |
-| playlist | id | 显示播放列表详情 |
-| createplaylist | name | 创建播放列表 |
-| deleteplaylist | id | 删除播放列表 |
-| addtoplaylist | pid mid | 添加歌曲到播放列表 |
-| removefromplaylist | pid mid | 从播放列表移除歌曲 |
-| mode | - | 显示当前播放模式 |
-| switch | - | 切换播放模式 |
-| setmode | mode | 直接设置播放模式 |
-| current | - | 显示当前播放歌曲 |
-| next | - | 下一首 |
-| prev | - | 上一首 |
-| loadall | - | 加载全部音乐到队列 |
-| loadplaylist | id | 加载播放列表到队列 |
-| queue | - | 显示播放队列信息 |
-| clearqueue | - | 清空播放队列 |
-| exit | - | 退出服务器 |
-
-### 使用示例
-```
-help
-list 10
-search Taylor
-artists
-stats
-scan
-addpath /home/user/Music
-createplaylist 我的最爱
-playlists
-addtoplaylist playlistId musicId
-loadall
-switch
-next
-queue
-exit
-```
-
-## 网络广播
-
-服务器定期向局域网发送 UDP 广播，用于服务自动发现。
-
-| 项目 | 说明 |
-| --- | --- |
-| 协议 | UDP |
-| 端口 | 9999 |
-| 目标 | 255.255.255.255（广播地址） |
-| 间隔 | 30 秒（可配置） |
-
-### 广播数据格式
-```
+```json
 {
-"type": "HelloMusic",
-"version": "1.0.0",
-"name": "HelloMusic",
-"port": 8080,
-"librarySize": 1250,
-"timestamp": 1705315200000,
-"api": "/api"
+  "musicLibraryPaths" : [ "/home/username/Music" ],
+  "serverPort" : 8080,
+  "broadcastPort" : 9999,
+  "broadcastInterval" : 30000,
+  "supportedExtensions" : [ "mp3", "mkv", "flac", "wav", "m4a", "ogg" ],
+  "serverName" : "HelloMusic",
+  "lastPlayMode" : "FORWARD"
 }
 ```
 
-### 客户端监听示例
+| 参数 | 类型 | 默认值 | 生效时机 | 说明 |
+| --- | --- | --- | --- | --- |
+| `musicLibraryPaths` | String[] | `[ "<用户主目录>/Music" ]` | 下次扫描 | 音乐库目录列表，**建议用绝对路径** |
+| `serverPort` | int | `8080` | **需重启** | HTTP 服务端口 |
+| `broadcastPort` | int | `9999` | 立即 | UDP 广播端口 |
+| `broadcastInterval` | int | `30000` | **需重启** | 广播间隔（毫秒） |
+| `supportedExtensions` | String[] | `["mp3","mkv","flac","wav","m4a","ogg"]` | 下次扫描 | 参与扫描的文件扩展名（不含点号，忽略大小写） |
+| `serverName` | String | `"HelloMusic"` | 立即 | 广播中通告的服务器名 |
+| `lastPlayMode` | String | `"FORWARD"` | — | 上次播放模式，**由程序自动写回**，不建议手改 |
+
+### 配置项取值范围
+
+`PUT /api/config` 会对提交的字段做校验，越界即返回 `400`：
+
+| 参数 | 取值范围 |
+| --- | --- |
+| `serverPort` / `broadcastPort` | 1 - 65535 |
+| `broadcastInterval` | 1000 - 3600000（毫秒） |
+| `musicLibraryPaths` | 至少一个，元素不能是空字符串 |
+| `supportedExtensions` | 至少一个，元素不能是空字符串（不含点号） |
+| `serverName` | 不能为空或纯空白 |
+| `lastPlayMode` | `FORWARD` / `REVERSE` / `SINGLE` / `SHUFFLE`（忽略大小写） |
+
+读取配置文件时同样做一次体检：非法项**回退为默认值**并在启动日志里告警，不会让服务带着坏配置启动。
+
+### 修改配置的三种方式
+
+**方式一：直接编辑文件**（改完后重启，或用 `scan` 重新扫描）
+
+```bash
+vim hellomusic-config.json
 ```
+
+**方式二：CLI 命令** —— 改音乐库路径的推荐做法，会自动触发扫描
+
+```
+addpath /media/nas/Music
+removepath 0
+```
+
+**方式三：REST API** —— 局部更新，只提交要改的字段即可
+
+```bash
+# 只改服务器名，其余字段保持不变
+curl -X PUT http://localhost:8080/api/config \
+     -H "Content-Type: application/json" \
+     -d '{"serverName":"客厅音乐"}'
+```
+
+- **只覆盖提交了的字段**，未提交或传 `null` 的字段保持原值，因此不必先 `GET` 再整体提交；
+- **取值非法直接返回 `400`**，并逐字段说明原因，配置文件不会被写坏：
+
+```bash
+curl -X PUT http://localhost:8080/api/config \
+     -H "Content-Type: application/json" \
+     -d '{"serverPort":0}'
+# {"error":"请求参数校验失败","details":[{"field":"serverPort","message":"端口取值范围为 1-65535"}]}
+```
+
+提交合法后**异步**触发一次全量扫描，接口立即返回、不会被扫描阻塞。
+
+
+---
+
+## 命令行界面
+
+服务启动后在同一个终端里使用，命令大小写不敏感。
+
+| 命令 | 参数 | 说明 |
+| --- | --- | --- |
+| `help` / `?` | — | 显示帮助 |
+| `list` | `[count]` | 列出音乐文件，默认显示 20 条，输出含时长与歌曲 ID |
+| `search` | `query` | 按文件名 / 标题 / 艺术家 / 专辑搜索，**支持带空格的查询** |
+| `artists` | — | 按艺术家分组列出（每位最多预览 3 首） |
+| `stats` | — | 库大小、扫描状态、端口、歌单数、当前模式、队列长度 |
+| `scan` | — | 立即扫描音乐库（**同步执行**，大库会阻塞 CLI） |
+| `broadcast` | — | 立即发送一次 UDP 广播 |
+| `config` | — | 打印当前配置与库路径 |
+| `addpath` | `path` | 添加音乐库目录，成功后自动扫描 |
+| `removepath` | `index` | 按序号移除目录，**序号从 0 开始**，用 `config` 查看 |
+| `playlists` | — | 列出所有歌单及其 ID |
+| `playlist` | `id` | 歌单详情（含歌曲列表） |
+| `createplaylist` | `name [description]` | 新建歌单，`name` 不能含空格 |
+| `deleteplaylist` | `id` | 删除歌单 |
+| `addtoplaylist` | `pid mid` | 把歌曲加入歌单 |
+| `removefromplaylist` | `pid mid` | 从歌单移除歌曲 |
+| `mode` | — | 显示当前播放模式 |
+| `switch` | — | 切到下一个播放模式 |
+| `setmode` | `FORWARD\|REVERSE\|SINGLE\|SHUFFLE` | 直接设置播放模式 |
+| `current` | — | 显示当前播放歌曲 |
+| `next` | — | 下一首 |
+| `prev` | — | 上一首 |
+| `loadall` | — | 全部音乐载入播放队列 |
+| `loadplaylist` | `id` | 歌单载入播放队列（自动剔除已失效的歌曲） |
+| `queue` | — | 播放队列信息（模式 / 总数 / 位置 / 当前歌曲） |
+| `clearqueue` | — | 清空播放队列 |
+| `exit` / `quit` | — | 退出程序 |
+
+### 示例
+
+```
+🎵> config
+🎵> addpath /media/nas/Music
+🎵> list 10
+🎵> search 周杰伦
+🎵> createplaylist 我的最爱
+🎵> playlists
+🎵> addtoplaylist 1f2e... 9a8b...
+🎵> loadplaylist 1f2e...
+🎵> setmode SHUFFLE
+🎵> next
+🎵> queue
+🎵> exit
+```
+
+---
+
+## REST API
+
+| 项目 | 说明 |
+| --- | --- |
+| Base URL | `http://localhost:8080/api` |
+| 响应格式 | `application/json;charset=UTF-8` |
+| CORS | 允许所有来源（见[安全提示](#安全提示)） |
+| 错误约定 | 参数非法返回 400，资源不存在返回 404；部分接口用 200 + `{"status":"..."}` 表达空状态 |
+
+### 音乐库
+
+| 方法 | 端点 | 说明 |
+| --- | --- | --- |
+| GET | `/api/music` | 全部音乐（**无分页**，一次返回整个库含元数据） |
+| GET | `/api/music/{id}` | 单首详情；不存在 → 404 |
+| GET | `/api/music/search?q=` | 搜索；`q` 为空 → 400 |
+| GET | `/api/music/artist/{artist}` | 按艺术家精确匹配（忽略大小写） |
+| GET | `/api/artists` | 艺术家 → 歌曲数组 的分组映射 |
+| GET | `/api/stream/{id}` | 流式播放，支持 `Range`；不支持的范围 → 416 |
+| POST | `/api/scan` | 触发**异步**扫描，立即返回 `{"status":"Scan started"}` |
+
+**`MusicFile` 响应结构**：
+
+```json
+{
+  "id": "9f0c2c6e-...",
+  "fileName": "周杰伦 - 稻香.mp3",
+  "filePath": "/home/user/Music/周杰伦 - 稻香.mp3",
+  "fileSize": 8123456,
+  "extension": "mp3",
+  "lastModified": "2026-08-14T21:03:11",
+  "url": "/api/stream/9f0c2c6e-...",
+  "metadata": {
+    "title": "稻香",
+    "artist": "周杰伦",
+    "album": "魔杰座",
+    "genre": "Pop",
+    "trackNumber": 3,
+    "year": 2008,
+    "duration": 223,
+    "bitrate": 320,
+    "comment": ""
+  }
+}
+```
+
+### 播放列表
+
+| 方法 | 端点 | 说明 |
+| --- | --- | --- |
+| GET | `/api/playlists` | 全部歌单（不含歌曲详情） |
+| GET | `/api/playlists/{id}` | 歌单详情，含 `songs` 数组；不存在 → 404 |
+| POST | `/api/playlists?name=&description=` | 新建歌单；`name` 为空 → 400 |
+| PUT | `/api/playlists/{id}?name=&description=` | 改名 / 改描述；不存在 → 404 |
+| DELETE | `/api/playlists/{id}` | 删除歌单；不存在 → 404 |
+| POST | `/api/playlists/{id}/songs?musicId=` | 加歌；歌单或歌曲不存在、或**歌曲已在歌单中** → 400 |
+| POST | `/api/playlists/{id}/songs/batch` | 请求体为 ID 数组，返回 `{"added": 3}`（只计真实新增） |
+| DELETE | `/api/playlists/{id}/songs/{musicId}` | 移除歌曲；歌单不存在或歌曲不在歌单中 → 404 |
+| DELETE | `/api/playlists/{id}/clear` | 清空歌单；不存在 → 404 |
+| PUT | `/api/playlists/{id}/reorder` | 请求体为歌曲 ID 数组，**必须与歌单内现有歌曲完全一致**，否则 400 |
+
+### 播放控制
+
+> 服务端目前只有一个 `default` 播放会话 —— **所有客户端共享同一个队列与播放位置**。
+
+| 方法 | 端点 | 说明 |
+| --- | --- | --- |
+| GET | `/api/playback/mode` | 返回 `{"mode":"FORWARD","displayName":"正向播放"}` |
+| POST | `/api/playback/mode/switch` | 切到下一个模式 |
+| POST | `/api/playback/mode?mode=SHUFFLE` | 设置模式；非法值 → 400 |
+| GET | `/api/playback/current` | 当前歌曲；队列为空 → `{"status":"empty"}` |
+| POST | `/api/playback/next` | 下一首；队列为空 → `{"status":"end"}` |
+| POST | `/api/playback/previous` | 上一首；队列为空 → `{"status":"begin"}` |
+| POST | `/api/playback/load/all` | 全部音乐载入队列 |
+| POST | `/api/playback/load` | 请求体为 ID 数组，载入队列 |
+| POST | `/api/playback/load/playlist/{id}` | 按歌单载入；歌单不存在或过滤后为空 → 400 |
+| GET | `/api/playback/queue` | `{playMode, currentIndex, total, isEmpty, currentSong}` |
+| DELETE | `/api/playback/queue` | 清空队列 |
+| POST | `/api/playback/queue/add?musicId=` | 追加单曲；歌曲不存在 → 400 |
+| POST | `/api/playback/queue/add/batch` | 请求体为 ID 数组，返回实际追加数 |
+
+### 系统管理
+
+| 方法 | 端点 | 说明 |
+| --- | --- | --- |
+| GET | `/api/stats` | `totalFiles`、`scanning`、`lastScan`（毫秒时间戳）、完整 `config` |
+| GET | `/api/config` | 当前配置 |
+| PUT | `/api/config` | **局部更新**配置（只覆盖提交的字段），非法取值 → 400，成功后异步触发扫描（见[配置说明](#配置说明)） |
+| GET | `/api/info` | `name`、`version`、`status`、`librarySize` |
+| POST | `/api/broadcast` | 立即发送一次广播 |
+| GET | `/actuator/health` | Spring Boot Actuator 健康检查（默认仅暴露 health） |
+
+### 调用示例
+
+```bash
+# 搜索
+curl "http://localhost:8080/api/music/search?q=稻香"
+
+# 切换为随机播放
+curl -X POST "http://localhost:8080/api/playback/mode?mode=SHUFFLE"
+
+# 新建歌单并加歌
+curl -X POST "http://localhost:8080/api/playlists?name=开车歌单&description=路上听"
+curl -X POST "http://localhost:8080/api/playlists/{id}/songs?musicId={musicId}"
+
+# 按歌单入队并播放下一首
+curl -X POST "http://localhost:8080/api/playback/load/playlist/{id}"
+curl -X POST "http://localhost:8080/api/playback/next"
+```
+
+---
+
+## 网络广播
+
+服务器周期性向局域网发送 UDP 广播，供客户端自动发现，无需手动填写 IP。
+
+| 项目 | 说明 |
+| --- | --- |
+| 协议 / 端口 | UDP / `9999`（可配置） |
+| 目标地址 | `255.255.255.255`，并额外发送一次本机子网广播地址 |
+| 间隔 | 30 秒（可配置，改后需重启） |
+| 触发方式 | 定时任务；也可用 CLI `broadcast` 或 `POST /api/broadcast` 立即触发 |
+
+**广播负载**（UTF-8 编码的 JSON 字符串）：
+
+```json
+{
+  "type": "HelloMusic",
+  "version": "1.0.0",
+  "name": "HelloMusic",
+  "port": 8080,
+  "librarySize": 1250,
+  "timestamp": 1786000000000,
+  "api": "/api"
+}
+```
+
+> `librarySize` 每次广播都实时读取当前库大小，可据此判断扫描是否完成。
+
+**Python 监听示例**：
+
+```python
 import socket
 import json
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(('', 9999))
 
+print('监听 UDP 9999 ...')
 while True:
-data, addr = sock.recvfrom(1024)
-info = json.loads(data.decode())
-print(f"发现音乐服务器: {info['name']} at {addr[0]}:{info['port']}")
+    data, addr = sock.recvfrom(2048)
+    try:
+        info = json.loads(data.decode('utf-8'))
+    except json.JSONDecodeError:
+        continue
+    print(f"发现音乐服务器: {info['name']} "
+          f"@ http://{addr[0]}:{info['port']}{info['api']} "
+          f"(曲库 {info['librarySize']} 首)")
 ```
 
-## 测试
+---
 
-测试使用 JUnit 5（由 `spring-boot-starter-test` 提供），位于 `src/test/java/core/`。
+## 播放模式
 
-```
-mvn test
-```
+| 模式 | 显示名 | 行为 |
+| --- | --- | --- |
+| `FORWARD` | 正向播放 | 顺序向后；到末尾回到第一首 |
+| `REVERSE` | 逆向播放 | 顺序向前；到开头回到最后一首 |
+| `SINGLE` | 单曲循环 | 始终停留在当前歌曲 |
+| `SHUFFLE` | 随机播放 | 随机选下一首；队列只有一首时直接返回该首 |
 
-| 测试类 | 覆盖点 |
-| --- | --- |
-| PlaybackSessionTest | 四种播放模式的推进与环绕、队列增删清空、多线程并发访问不越界 |
-| PlaylistTest | 歌单增删的返回值语义、无实际变更时不刷新更新时间、musicIds 为 null 的兜底 |
-| PlaylistJsonTest | 歌单 JSON 序列化往返（含 LocalDateTime），守住歌单持久化修复 |
-| MetadataExtractorTest | 标签缺失时用「艺术家 - 标题」文件名兜底 |
-| Mp3DurationParserTest | CBR 时长估算、Xing(VBR) 头部解析、ID3v2 跳过、异常输入返回 0 |
+模式变更会立刻写回配置文件，重启后自动恢复。
+
+---
+
+## 运行时文件
+
+| 文件 | 生成时机 | 内容 |
+| --- | --- | --- |
+| `hellomusic-config.json` | 首次启动 | 服务器配置（端口、库路径、扩展名、上次播放模式） |
+| `playlists.json` | 首次创建歌单 | 所有歌单及其歌曲 ID 列表、创建/更新时间 |
+
+两者都写在**当前工作目录**，均已在 `.gitignore` 中忽略，不会污染仓库。
 
 ---
 
 ## 项目结构
+
 ```
 HelloMusic/
 ├── src/main/java/core/
-│ ├── HelloMusicApplication.java
-│ ├── ConfigManager.java
-│ ├── MusicFile.java
-│ ├── MusicMetadata.java
-│ ├── MusicScannerService.java
-│ ├── MetadataExtractor.java
-│ ├── Mp3DurationParser.java
-│ ├── BroadcastService.java
-│ ├── MusicController.java
-│ ├── Playlist.java
-│ ├── PlaylistService.java
-│ ├── PlaylistController.java
-│ ├── PlayMode.java
-│ ├── PlaybackSession.java
-│ ├── PlaybackService.java
-│ ├── PlaybackController.java
-│ └── CommandLineInterface.java
+│   ├── HelloMusicApplication.java   # 启动入口：端口桥接、启动横幅
+│   ├── ConfigManager.java           # 配置读写（hellomusic-config.json）
+│   ├── MusicScannerService.java     # 库扫描：启动同步一次 + 每 5 分钟定时
+│   ├── MetadataExtractor.java       # 元数据提取（jaudiotagger + 文件名兜底）
+│   ├── Mp3DurationParser.java       # MP3 时长：CBR 估算 + Xing/VBRI 头部
+│   ├── MusicFile.java               # 曲目模型
+│   ├── MusicMetadata.java           # 标签模型
+│   ├── BroadcastService.java        # UDP 广播
+│   ├── MusicController.java         # /api 音乐库与系统接口
+│   ├── ApiExceptionHandler.java     # 请求体校验失败 → 结构化 400
+│   ├── Playlist.java                # 歌单模型
+│   ├── PlaylistService.java         # 歌单服务（含 JSON 持久化）
+│   ├── PlaylistController.java      # /api/playlists 接口
+│   ├── PlayMode.java                # 播放模式枚举
+│   ├── PlaybackSession.java         # 单会话队列与游标（线程安全）
+│   ├── PlaybackService.java         # 多会话管理、模式持久化
+│   ├── PlaybackController.java      # /api/playback 接口
+│   └── CommandLineInterface.java    # 交互式 CLI
 ├── src/test/java/core/
-│ ├── PlaybackSessionTest.java
-│ ├── PlaylistTest.java
-│ ├── PlaylistJsonTest.java
-│ ├── MetadataExtractorTest.java
-│ └── Mp3DurationParserTest.java
+│   ├── PlaybackSessionTest.java
+│   ├── PlaylistTest.java
+│   ├── PlaylistJsonTest.java
+│   ├── MetadataExtractorTest.java
+│   ├── Mp3DurationParserTest.java
+│   ├── ConfigManagerTest.java
+│   └── MusicControllerConfigEndpointTest.java
 ├── pom.xml
-├── README.md
-└── LICENSE
+├── .gitignore                       # 忽略 target/、IDE 文件与运行时数据
+├── LICENSE                          # GPL-3.0 官方全文
+└── README.md
 ```
+
+> `hellomusic-config.json` 与 `playlists.json` 是运行时才生成到工作目录的，不属于源码树。
+
+---
 
 ## 技术栈
 
 | 技术 | 版本 | 用途 |
 | --- | --- | --- |
-| Java | 21 | 编程语言 |
-| Spring Boot | 3.2.0 | Web 框架 |
-| Apache Commons IO | 2.15.1 | 文件操作 |
-| Jaudiotagger | 3.0.1 | 音频元数据解析（MP3/FLAC/M4A/OGG/WAV） |
-| Jackson | 最新 | JSON 处理 |
-| Maven | 3.6+ | 构建工具 |
-| JUnit 5 | 随 Spring Boot 管理 | 单元测试 |
+| Java | 21 | 语言与运行时 |
+| Spring Boot | 3.2.0 | Web 框架、依赖注入、定时任务 |
+| Spring Boot Web | 随 Boot | 内嵌 Tomcat、REST 接口 |
+| Spring Boot Actuator | 随 Boot | 健康检查等运维端点 |
+| Bean Validation | 随 Boot | 配置接口的字段校验（Hibernate Validator） |
+| Apache Commons IO | 2.15.1 | 路径与扩展名处理 |
+| jaudiotagger | 3.0.1 | 音频标签解析（MP3/FLAC/M4A/OGG/WAV） |
+| Jackson | 随 Boot | JSON 序列化（已注册 JavaTimeModule） |
+| Maven | 3.6+ | 构建与测试 |
+| JUnit 5 | 随 Boot | 单元测试 |
 
+---
+
+## 开发与测试
+
+```bash
+mvn clean test          # 运行单元测试
+mvn test -Dtest=PlaybackSessionTest    # 只跑一个测试类
+mvn spring-boot:run     # 开发模式直接启动
+```
+
+测试位于 `src/test/java/core/`，共 7 个测试类：
+
+| 测试类 | 覆盖点 |
+| --- | --- |
+| `PlaybackSessionTest` | 四种播放模式的推进与环绕、队列增删清空、防御性拷贝，以及 8 线程 × 2000 次并发压测 |
+| `PlaylistTest` | 增删的返回值语义、无实际变更时不刷新 `updatedAt`、`musicIds` 为 null 的兜底 |
+| `PlaylistJsonTest` | 歌单 JSON 序列化往返（含 `LocalDateTime`），守住歌单持久化行为 |
+| `MetadataExtractorTest` | 标签缺失时按「艺术家 - 标题」解析文件名 |
+| `Mp3DurationParserTest` | CBR 估算、Xing(VBR) 头部解析、ID3v2 跳过、异常输入返回 0 |
+| `ConfigManagerTest` | `PUT /api/config` 的合并语义（未提交字段保持原值）与字段校验约束 |
+| `MusicControllerConfigEndpointTest` | 该接口的接线：非法取值返回 400 与出错字段名、提交的 patch 原样下发、成功后异步触发扫描 |
+
+---
+
+## 常见问题
+
+**端口被占用起不来？**
+命令行参数优先级高于配置文件，可以临时覆盖：`java -jar target/HelloMusic.jar --server.port=8081`。
+
+**扫描不到文件？**
+依次确认：库路径存在且是目录（`config` 命令查看）→ 扩展名在 `supportedExtensions` 里 → 文件确实可读。日志里 `⚠️ Invalid library path` 表示路径无效。
+
+**局域网里搜不到广播？**
+先放行防火墙的 UDP 9999 **入站**。若网络设备不转发 `255.255.255.255`，本项目已额外向本机子网广播地址补发一次，但仍需客户端与服务端处于同一网段。
+
+**换目录启动后配置/歌单"消失"了？**
+配置与歌单是相对**当前工作目录**读写的，换目录等于换了一份空配置。固定目录启动，或把这两个文件一起带过去。
+
+**中文标签乱码或读不出来？**
+jaudiotagger 会尝试 UTF-8/GBK 解码；确实没有标签的文件会走文件名兜底（`艺术家 - 标题.ext`）。把文件名规范成 `艺术家 - 标题.mp3` 也能得到正确结果。
+
+**MP3 时长不准？**
+带 Xing/Info 或 VBRI 头部的 VBR 文件已按帧精确计算；没有这些头部的文件只能按首帧比特率估算，会有偏差。
+
+**`PUT /api/config` 时漏写某个字段，会把那一项清掉吗？**
+不会。该接口是**局部更新**：只覆盖提交了的字段，未提交（或传 `null`）的字段保持原值；取值非法会直接返回 `400` 并说明原因，配置文件不会被写坏。详见[配置说明](#配置说明)。
+
+---
+
+## 安全提示
+
+本项目面向**可信局域网内**使用，默认**没有任何鉴权**，且所有接口都允许跨域（`Access-Control-Allow-Origin: *`）：
+
+- `PUT /api/config` 可以修改音乐库路径与受支持扩展名，配合 `/api/stream/{id}` 可能被用来读取服务器上的任意文件；
+- `/api/music`、`/api/config` 会返回服务器上的**绝对路径**。
+
+因此：**不要把它直接暴露到公网**，也不要在不可信的网络里长期运行。如需公网访问，请自行在反向代理层加上鉴权、按来源收敛 CORS，并限制可访问的库路径。
+
+---
 
 ## 贡献指南
 
 1. Fork 本项目
-2. 创建功能分支
-3. 提交更改
-4. 推送到分支
+2. 创建功能分支（`git checkout -b feature/xxx`）
+3. 提交更改（`git commit -m 'feat: xxx'`）
+4. 推送到分支（`git push origin feature/xxx`）
 5. 打开 Pull Request
+
+---
 
 ## 许可证
 
-本项目采用 **GNU General Public License v3.0（GPL-3.0）** 许可证，版权持有人（copyright holder）为 **Lu Jiafan**。完整条款见根目录 [LICENSE](LICENSE) 文件（该文件为 GPL-3.0 官方原文，未作任何修改）。
+本项目采用 **GNU General Public License v3.0（GPL-3.0）**，版权持有人（copyright holder）为 **Lu Jiafan**。完整条款见根目录 [LICENSE](LICENSE) 文件（该文件为 GPL-3.0 官方原文，未作任何修改）。
 
 ```
 HelloMusic - Local music server with UDP broadcast and REST API
@@ -427,13 +571,15 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ```
 
-简单来说，你可以自由使用、修改和分发本项目，但**分发衍生作品时必须同样以 GPL-3.0 开源并提供源码**。
+简单来说：你可以自由使用、修改和分发本项目，但**分发衍生作品时必须同样以 GPL-3.0 开源并提供源码**。
 
 ## 致谢
 
-- DeepSeek - AI 辅助开发
-- Spring Boot - 应用框架
-- Adoptium - Java 发行版
+- [DeepSeek](https://www.deepseek.com/) —— AI 辅助开发
+- [Spring Boot](https://spring.io/projects/spring-boot) —— 应用框架
+- [Adoptium](https://adoptium.net/) —— Java 发行版
+- [jaudiotagger](https://bitbucket.org/ijabz/jaudiotagger) —— 音频标签解析
 
+---
 
-如果这个项目对你有帮助，请给个 Star！
+如果这个项目对你有帮助，欢迎给个 Star ⭐

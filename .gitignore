@@ -1,5 +1,10 @@
 target/
 !.mvn/wrapper/maven-wrapper.jar
+
+### 运行时用户数据（程序写到当前工作目录，属本地状态，不应提交） ###
+hellomusic-config.json
+playlists.json
+
 !**/src/main/**/target/
 !**/src/test/**/target/
 .kotlin

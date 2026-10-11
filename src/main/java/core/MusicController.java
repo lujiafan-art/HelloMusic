@@ -18,6 +18,7 @@
 
 package core;
 
+import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.task.TaskExecutor;
@@ -221,8 +222,15 @@ public class MusicController {
         return ResponseEntity.ok(configManager.getConfig());
     }
 
+    /**
+     * 局部更新配置：只提交要改的字段即可，未提交的字段保持原值（见 {@code ConfigManager.mergeInto}）。
+     *
+     * <p>取值非法（端口越界、扩展名列表为空……）时由 {@code @Valid} 拦下，
+     * 统一返回 400 及逐字段的原因，不会写坏配置文件。
+     */
     @PutMapping("/config")
-    public ResponseEntity<ConfigManager.Config> updateConfig(@RequestBody ConfigManager.Config config) {
+    public ResponseEntity<ConfigManager.Config> updateConfig(
+            @Valid @RequestBody ConfigManager.Config config) {
         configManager.setConfig(config);
         // 配置变更后需要重新扫描，但扫描可能耗时数分钟。
         // 放到线程池异步执行，避免 HTTP 请求被扫描阻塞直至超时。

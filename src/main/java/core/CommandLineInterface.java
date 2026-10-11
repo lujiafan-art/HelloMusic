@@ -326,6 +326,12 @@ public class CommandLineInterface implements CommandLineRunner {
             ConfigManager.Config config = configManager.getConfig();
             List<String> paths = config.getMusicLibraryPaths();
 
+            // 至少保留一个库目录：空列表是非法配置（接口侧由 bean validation 拦截，这里同步把关）
+            if (paths.size() <= 1) {
+                System.out.println("❌ At least one library path must be kept.");
+                return;
+            }
+
             if (index >= 0 && index < paths.size()) {
                 String removed = paths.remove(index);
                 configManager.saveConfig();
