@@ -27,12 +27,15 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -110,6 +113,13 @@ public class MusicController {
     /**
      * 流式播放音乐（内存优化 + 支持 Range 拖动）
      */
+    /**
+     * 流式播放音乐（内存优化 + 支持 Range 拖动）。
+     *
+     * <p>Range 解析兼容三种形式：标准 {@code bytes=start-end}、后缀 {@code bytes=-N}（末尾 N 字节）、
+     * 开放区间 {@code bytes=start-}（到末尾）；多段 Range 按 RFC 7233 以
+     * {@code multipart/byteranges} 返回。</p>
+     */
     @GetMapping("/stream/{id}")
     public ResponseEntity<?> streamMusic(
             @PathVariable String id,
@@ -143,72 +153,184 @@ public class MusicController {
             }
         }
 
-        // 有 Range → 返回指定范围
+        // 有 Range → 解析后返回指定范围（单段 206，多段 multipart/byteranges）
         try {
-            String range = rangeHeader.replace("bytes=", "").trim();
-            String[] parts = range.split("-");
-            long start = Long.parseLong(parts[0]);
-            long end = parts.length > 1 && !parts[1].isEmpty()
-                    ? Long.parseLong(parts[1])
-                    : fileLength - 1;
-
-            // 兼容部分播放器发送的超界 Range：把 end 收敛到文件末尾，而不是直接返回 416
-            if (end >= fileLength) {
-                end = fileLength - 1;
-            }
-
-            if (start < 0 || start >= fileLength || start > end) {
+            List<long[]> ranges = parseRanges(rangeHeader, fileLength);
+            if (ranges == null || ranges.isEmpty()) {
+                // 无法解析或含非法段 → 按 RFC 7233 返回 416，并给出文件总长度
                 return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
                         .header("Content-Range", "bytes */" + fileLength)
                         .build();
             }
 
-            long contentLength = end - start + 1;
-            RandomAccessFile raf = new RandomAccessFile(file, "r");
-            raf.seek(start);
+            if (ranges.size() == 1) {
+                long[] r = ranges.get(0);
+                long start = r[0], end = r[1];
+                long contentLength = end - start + 1;
+                RandomAccessFile raf = new RandomAccessFile(file, "r");
+                raf.seek(start);
 
-            InputStream limitedStream = new InputStream() {
-                private long remaining = contentLength;
+                InputStream limitedStream = new InputStream() {
+                    private long remaining = contentLength;
 
-                @Override
-                public int read() throws IOException {
-                    if (remaining <= 0) return -1;
-                    int b = raf.read();
-                    if (b != -1) remaining--;
-                    return b;
-                }
+                    @Override
+                    public int read() throws IOException {
+                        if (remaining <= 0) return -1;
+                        int b = raf.read();
+                        if (b != -1) remaining--;
+                        return b;
+                    }
 
-                @Override
-                public int read(byte[] b, int off, int len) throws IOException {
-                    if (remaining <= 0) return -1;
-                    int toRead = (int) Math.min(len, remaining);
-                    int read = raf.read(b, off, toRead);
-                    if (read > 0) remaining -= read;
-                    return read;
-                }
+                    @Override
+                    public int read(byte[] b, int off, int len) throws IOException {
+                        if (remaining <= 0) return -1;
+                        int toRead = (int) Math.min(len, remaining);
+                        int read = raf.read(b, off, toRead);
+                        if (read > 0) remaining -= read;
+                        return read;
+                    }
 
-                @Override
-                public void close() throws IOException {
-                    raf.close();
-                }
-            };
+                    @Override
+                    public void close() throws IOException {
+                        raf.close();
+                    }
+                };
 
-            return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
-                    .contentType(MediaType.parseMediaType(contentType))
-                    .contentLength(contentLength)
-                    .header("Accept-Ranges", "bytes")
-                    .header("Content-Range", "bytes " + start + "-" + end + "/" + fileLength)
-                    .header("X-File-Name", musicFile.getFileName())
-                    .body(new InputStreamResource(limitedStream));
+                return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                        .contentType(MediaType.parseMediaType(contentType))
+                        .contentLength(contentLength)
+                        .header("Accept-Ranges", "bytes")
+                        .header("Content-Range", "bytes " + start + "-" + end + "/" + fileLength)
+                        .header("X-File-Name", musicFile.getFileName())
+                        .body(new InputStreamResource(limitedStream));
+            }
 
-        } catch (NumberFormatException e) {
-            // 无法解析的 Range 头，按 RFC 7233 返回 416
-            return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                    .header("Content-Range", "bytes */" + fileLength)
-                    .build();
+            // 多段 → multipart/byteranges
+            return buildMultipartRange(file, ranges, fileLength, contentType, musicFile.getFileName());
+
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
+    }
+
+    /**
+     * 解析 Range 头，返回一组 {@code [start, end]}（含端点，均为闭区间）。
+     * 无法解析、含未知单位或任一子段非法时返回 {@code null}。
+     */
+    private List<long[]> parseRanges(String rangeHeader, long fileLength) {
+        if (!rangeHeader.toLowerCase().startsWith("bytes=")) {
+            return null; // 仅支持 bytes 单位
+        }
+        String spec = rangeHeader.substring("bytes=".length()).trim();
+        if (spec.isEmpty()) {
+            return null;
+        }
+        List<long[]> result = new ArrayList<>();
+        for (String part : spec.split(",")) {
+            part = part.trim();
+            if (part.isEmpty()) {
+                return null;
+            }
+            int dash = part.indexOf('-');
+            if (dash < 0) {
+                return null;
+            }
+            String startStr = part.substring(0, dash);
+            String endStr = part.substring(dash + 1);
+            long start, end;
+            if (startStr.isEmpty()) {
+                // 后缀形式 bytes=-N：取末尾 N 字节
+                long suffix;
+                try {
+                    suffix = Long.parseLong(endStr);
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+                if (suffix <= 0) {
+                    return null; // 无效后缀（如 -0 或非数字）
+                }
+                start = Math.max(0, fileLength - suffix);
+                end = fileLength - 1;
+            } else {
+                try {
+                    start = Long.parseLong(startStr);
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+                if (endStr.isEmpty()) {
+                    end = fileLength - 1; // 开放区间 bytes=start-：到末尾
+                } else {
+                    try {
+                        end = Long.parseLong(endStr);
+                    } catch (NumberFormatException e) {
+                        return null;
+                    }
+                }
+            }
+            // 非法段：越界或反序 → 整个 Range 请求不满足
+            if (start < 0 || end < 0 || start > end || start >= fileLength) {
+                return null;
+            }
+            if (end >= fileLength) {
+                end = fileLength - 1; // 收敛超界 end（保持 start<=end）
+            }
+            result.add(new long[]{start, end});
+        }
+        return result;
+    }
+
+    /**
+     * 按 RFC 7233 构造多段 Range 的 {@code multipart/byteranges} 响应体。
+     */
+    private ResponseEntity<byte[]> buildMultipartRange(File file, List<long[]> ranges,
+            long fileLength, String contentType, String fileName) throws IOException {
+        String boundary = "HELLO_MUSIC_" + System.nanoTime();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] crlf = "\r\n".getBytes(StandardCharsets.UTF_8);
+
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            boolean first = true;
+            for (long[] r : ranges) {
+                long start = r[0], end = r[1];
+                long len = end - start + 1;
+
+                // 段分隔符：首段前无前导 CRLF
+                out.write((first ? "--" : "\r\n--").getBytes(StandardCharsets.UTF_8));
+                out.write(boundary.getBytes(StandardCharsets.UTF_8));
+                out.write(crlf);
+                // 段头
+                out.write(("Content-Type: " + contentType).getBytes(StandardCharsets.UTF_8));
+                out.write(crlf);
+                out.write(("Content-Range: bytes " + start + "-" + end + "/" + fileLength)
+                        .getBytes(StandardCharsets.UTF_8));
+                out.write(crlf);
+                out.write(crlf);
+                // 段体
+                raf.seek(start);
+                byte[] buf = new byte[8192];
+                long remaining = len;
+                while (remaining > 0) {
+                    int toRead = (int) Math.min(buf.length, remaining);
+                    int read = raf.read(buf, 0, toRead);
+                    if (read < 0) break;
+                    out.write(buf, 0, read);
+                    remaining -= read;
+                }
+                out.write(crlf);
+                first = false;
+            }
+            // 结束边界
+            out.write(("\r\n--" + boundary + "--").getBytes(StandardCharsets.UTF_8));
+            out.write(crlf);
+        }
+
+        byte[] body = out.toByteArray();
+        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                .contentType(MediaType.parseMediaType("multipart/byteranges; boundary=" + boundary))
+                .contentLength(body.length)
+                .header("Accept-Ranges", "bytes")
+                .header("X-File-Name", fileName)
+                .body(body);
     }
 
     @PostMapping("/broadcast")

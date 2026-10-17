@@ -144,9 +144,13 @@ public class PlaylistController {
     public ResponseEntity<?> reorderPlaylist(
             @PathVariable String id,
             @RequestBody List<String> musicIds) {
+        if (musicIds == null || musicIds.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "musicIds is required"));
+        }
         boolean reordered = playlistService.reorderPlaylist(id, musicIds);
         if (!reordered) {
-            return ResponseEntity.badRequest().build();
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "重排序失败：ID 列表必须是该歌单的完整排列（长度一致、无重复、每个 ID 都在歌单中）"));
         }
         return ResponseEntity.ok(Map.of("status", "Reordered"));
     }

@@ -51,6 +51,7 @@ class ConfigManagerTest {
         config.setServerPort(8080);
         config.setBroadcastPort(9999);
         config.setBroadcastInterval(30000);
+        config.setScanThreads(4);
         config.setSupportedExtensions(new ArrayList<>(List.of("mp3", "flac")));
         config.setServerName("HelloMusic");
         config.setLastPlayMode("FORWARD");
@@ -83,6 +84,7 @@ class ConfigManagerTest {
         assertEquals(Integer.valueOf(8080), merged.getServerPort(), "未提交的端口应保留原值");
         assertEquals(Integer.valueOf(9999), merged.getBroadcastPort());
         assertEquals(Integer.valueOf(30000), merged.getBroadcastInterval());
+        assertEquals(Integer.valueOf(4), merged.getScanThreads(), "未提交的解析线程数应保留原值");
         assertEquals(List.of("/srv/music"), merged.getMusicLibraryPaths());
         assertEquals(List.of("mp3", "flac"), merged.getSupportedExtensions());
         assertEquals("FORWARD", merged.getLastPlayMode());
@@ -95,6 +97,7 @@ class ConfigManagerTest {
         patch.setServerPort(9090);
         patch.setBroadcastPort(9998);
         patch.setBroadcastInterval(60000);
+        patch.setScanThreads(2);
         patch.setSupportedExtensions(new ArrayList<>(List.of("mp3")));
         patch.setServerName("NAS");
         patch.setLastPlayMode("SHUFFLE");
@@ -105,6 +108,7 @@ class ConfigManagerTest {
         assertEquals(Integer.valueOf(9090), merged.getServerPort());
         assertEquals(Integer.valueOf(9998), merged.getBroadcastPort());
         assertEquals(Integer.valueOf(60000), merged.getBroadcastInterval());
+        assertEquals(Integer.valueOf(2), merged.getScanThreads());
         assertEquals(List.of("mp3"), merged.getSupportedExtensions());
         assertEquals("NAS", merged.getServerName());
         assertEquals("SHUFFLE", merged.getLastPlayMode());
@@ -156,6 +160,17 @@ class ConfigManagerTest {
         patch.setBroadcastInterval(500);
 
         assertTrue(violates(validate(patch), "broadcastInterval"));
+    }
+
+    @Test
+    void rejectsOutOfRangeScanThreads() {
+        ConfigManager.Config tooLow = emptyPatch();
+        tooLow.setScanThreads(0);
+        ConfigManager.Config tooHigh = emptyPatch();
+        tooHigh.setScanThreads(1000);
+
+        assertTrue(violates(validate(tooLow), "scanThreads"), "0 个解析线程毫无意义，应被拦下");
+        assertTrue(violates(validate(tooHigh), "scanThreads"), "线程数上限为 64");
     }
 
     @Test

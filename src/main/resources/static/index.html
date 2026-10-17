@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HelloMusic · 播放器</title>
+<style>
+  :root {
+    --bg: #f5f7fa;
+    --card: #ffffff;
+    --text: #1f2933;
+    --muted: #7b8794;
+    --accent: #2f6fed;
+    --accent-soft: #e8f0fe;
+    --track: #e4e7eb;
+    --border: #e4e7eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .wrap {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 24px 16px 60px;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+  header h1 { font-size: 20px; margin: 0; }
+  header .dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--accent);
+  }
+  .now-playing {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+    margin-bottom: 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .np-title { font-size: 19px; font-weight: 600; }
+  .np-artist { color: var(--muted); margin-top: 4px; font-size: 14px; }
+  .np-mode {
+    display: inline-block; margin-top: 10px; font-size: 12px;
+    color: var(--accent); background: var(--accent-soft);
+    padding: 2px 10px; border-radius: 999px;
+  }
+
+  .progress-area { margin-top: 18px; }
+  .bar {
+    position: relative;
+    height: 10px;
+    background: var(--track);
+    border-radius: 999px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .bar-fill {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    width: 0%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 0.2s linear;
+  }
+  .bar-handle {
+    position: absolute; top: 50%;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; border: 3px solid var(--accent);
+    transform: translate(-50%, -50%);
+    left: 0%;
+    pointer-events: none;
+  }
+  .time-row {
+    display: flex; justify-content: space-between;
+    font-size: 13px; color: var(--muted);
+    margin-top: 8px; font-variant-numeric: tabular-nums;
+  }
+
+  .controls {
+    display: flex; align-items: center; justify-content: center;
+    gap: 18px; margin-top: 18px;
+  }
+  .btn {
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    border-radius: 12px;
+    padding: 10px 16px;
+    font-size: 15px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-play {
+    width: 60px; height: 60px; border-radius: 50%;
+    font-size: 22px; display: flex; align-items: center; justify-content: center;
+    background: var(--accent); color: #fff; border: none;
+  }
+  .btn-play:hover { background: #2a60cf; }
+
+  .section-title {
+    font-size: 14px; color: var(--muted); margin: 26px 0 10px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .section-title .spacer { flex: 1; }
+  .lib {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .lib-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .lib-row:last-child { border-bottom: none; }
+  .lib-row:hover { background: var(--accent-soft); }
+  .lib-row.active { background: var(--accent-soft); }
+  .lib-row .idx { color: var(--muted); width: 24px; text-align: right; font-size: 13px; }
+  .lib-row .meta { flex: 1; min-width: 0; }
+  .lib-row .t { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lib-row .a { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lib-row .dur { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .lib-row .eq { color: var(--accent); font-size: 12px; }
+  .empty-hint { padding: 20px; color: var(--muted); text-align: center; font-size: 14px; }
+  audio { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="dot"></span>
+    <h1>HelloMusic</h1>
+  </header>
+
+  <section class="now-playing">
+    <div class="np-title" id="npTitle">未在播放</div>
+    <div class="np-artist" id="npArtist">从下方曲库选择一首开始播放</div>
+    <span class="np-mode" id="npMode" style="display:none"></span>
+
+    <div class="progress-area">
+      <div class="bar" id="bar">
+        <div class="bar-fill" id="barFill"></div>
+        <div class="bar-handle" id="barHandle"></div>
+      </div>
+      <div class="time-row">
+        <span id="curTime">0:00</span>
+        <span id="totTime">0:00</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="btn" id="prevBtn" title="上一首">⏮</button>
+      <button class="btn btn-play" id="playBtn" title="播放/暂停">▶</button>
+      <button class="btn" id="nextBtn" title="下一首">⏭</button>
+      <button class="btn" id="loadAllBtn" title="载入全部并播放">📥 全部</button>
+    </div>
+  </section>
+
+  <div class="section-title">
+    <span>曲库</span>
+    <span class="spacer"></span>
+    <button class="btn" id="refreshBtn" style="padding:6px 12px;font-size:13px;">刷新</button>
+  </div>
+  <div class="lib" id="library">
+    <div class="empty-hint">加载中…</div>
+  </div>
+
+  <audio id="audio" preload="metadata"></audio>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const audio = $("audio");
+
+// 当前「服务端认定的正在播放」状态
+let server = { songId: null, isPlaying: false, duration: 0, position: 0, percent: 0 };
+
+function fmt(sec) {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return m + ":" + String(s).padStart(2, "0");
+}
+
+// 当前用于显示的总时长：优先用服务端元数据时长，缺失时退回 audio 自带时长
+function totalSeconds() {
+  if (server.duration && server.duration > 0) return server.duration;
+  if (audio.duration && isFinite(audio.duration)) return audio.duration;
+  return 0;
+}
+
+// 恢复播放时，用服务端权威时间对齐本地音频位置（音频元数据加载完成前先暂存）
+let pendingSeek = null;
+function applyPosition(pos) {
+  if (pos == null) return;
+  if (audio.readyState >= 1) { // HAVE_METADATA 及以上，可直接定位
+    try { audio.currentTime = pos; } catch (e) {}
+  } else {
+    pendingSeek = pos;
+  }
+}
+
+// ===== 与服务器同步 =====
+async function api(method, url, body) {
+  const opt = { method, headers: {} };
+  if (body !== undefined) {
+    opt.headers["Content-Type"] = "application/json";
+    opt.body = JSON.stringify(body);
+  }
+  const resp = await fetch(url, opt);
+  if (!resp.ok) return null;
+  const ct = resp.headers.get("content-type") || "";
+  return ct.includes("application/json") ? resp.json() : null;
+}
+
+async function refreshProgress() {
+  const p = await api("GET", "/api/playback/progress");
+  if (!p) return;
+  server.songId = p.songId || null;
+  server.isPlaying = p.isPlaying;
+  server.duration = p.duration || 0;
+  server.position = p.position || 0;
+  server.percent = p.percent || 0;
+
+  if (p.status === "empty") {
+    $("npTitle").textContent = "未在播放";
+    $("npArtist").textContent = "从下方曲库选择一首开始播放";
+    $("npMode").style.display = "none";
+  } else {
+    $("npTitle").textContent = p.title || "未知";
+    $("npArtist").textContent = (p.artist || "") + (p.album ? " · " + p.album : "");
+    $("npMode").style.display = "";
+    $("npMode").textContent = p.playMode || "";
+  }
+
+  // 若服务端歌曲与本地音频不一致，切换音源（处理来自 CLI / 其他客户端的切歌）
+  if (server.songId && audio.dataset.songId !== server.songId) {
+    audio.dataset.songId = server.songId;
+    audio.src = "/api/stream/" + encodeURIComponent(server.songId);
+    audio.load();
+  }
+
+  // 依据服务端播放状态校正本地播放器
+  if (server.songId) {
+    if (server.isPlaying && audio.paused) {
+      try { await audio.play(); } catch (e) {}
+    } else if (!server.isPlaying && !audio.paused) {
+      audio.pause();
+    }
+  }
+
+  // 同步握手：拉取进度后，若当前有活跃歌曲，显式回传「已同步」确认（/sync/ack）
+  if (p.status !== "empty") {
+    api("POST", "/api/playback/sync/ack");
+  }
+
+  updatePlayButton();
+  highlightCurrent();
+}
+
+// 进度条以本地 audio.currentTime 为准（平滑），服务端时长做兜底
+function updateBar() {
+  const tot = totalSeconds();
+  let pos;
+  if (audio.dataset.songId && audio.currentTime && isFinite(audio.currentTime)) {
+    pos = audio.currentTime;
+  } else {
+    pos = server.position;
+  }
+  const pct = tot > 0 ? Math.min(100, (pos / tot) * 100) : 0;
+  $("barFill").style.width = pct + "%";
+  $("barHandle").style.left = pct + "%";
+  $("curTime").textContent = fmt(pos);
+  $("totTime").textContent = fmt(tot);
+}
+
+function updatePlayButton() {
+  const playing = server.isPlaying && audio.dataset.songId;
+  $("playBtn").textContent = playing ? "⏸" : "▶";
+}
+
+// ===== 用户操作 =====
+
+// 开始 / 恢复播放的握手：
+//   1) 客户端先告诉服务端播放（POST /play）
+//   2) 服务端返回权威时间（position）
+//   3) 客户端用权威时间对齐本地播放位置，并回传 /sync/ack 确认已同步
+//   4) 本地开始播放
+async function beginPlayback(r) {
+  if (!r || r.status === "empty") return false;
+  server.songId = r.songId;
+  server.isPlaying = r.isPlaying;
+  server.duration = r.duration || 0;
+  server.position = r.position || 0;
+  server.percent = r.percent || 0;
+  if (audio.dataset.songId !== r.songId) {
+    audio.dataset.songId = r.songId;
+    audio.src = "/api/stream/" + encodeURIComponent(r.songId);
+    audio.load();
+  }
+  // 用服务端返回的权威时间对齐本地播放位置（新歌为 0；恢复播放为暂停处）
+  applyPosition(r.position);
+  // 握手最后一步：客户端回传「已同步」确认
+  await api("POST", "/api/playback/sync/ack");
+  try { await audio.play(); } catch (e) {}
+  updatePlayButton();
+  return true;
+}
+
+async function playSong(id) {
+  await api("POST", "/api/playback/load", [id]);
+  const r = await api("POST", "/api/playback/play");
+  if (!(await beginPlayback(r))) return;
+  refreshProgress();
+}
+
+async function togglePlay() {
+  if (!audio.dataset.songId) {
+    // 没有已载入的歌曲：载入全部并播放第一首
+    await loadAllAndPlay();
+    return;
+  }
+  if (audio.paused) {
+    // 恢复播放：先告诉服务端，拿到权威时间，再回传已同步确认
+    const r = await api("POST", "/api/playback/play");
+    if (!(await beginPlayback(r))) return;
+  } else {
+    // 暂停：必须告诉服务端（服务端据此固化进度）
+    audio.pause();
+    await api("POST", "/api/playback/pause");
+  }
+  refreshProgress();
+}
+
+async function loadAllAndPlay() {
+  await api("POST", "/api/playback/load/all");
+  const r = await api("POST", "/api/playback/play");
+  if (!(await beginPlayback(r))) return;
+  refreshProgress();
+}
+
+async function gotoNext() {
+  const r = await api("POST", "/api/playback/next");
+  if (!r || r.status === "end") return;
+  server.songId = r.id;
+  audio.dataset.songId = r.id;
+  audio.src = "/api/stream/" + encodeURIComponent(r.id);
+  audio.load();
+  if (server.isPlaying) { try { await audio.play(); } catch (e) {} }
+  refreshProgress();
+}
+
+async function gotoPrev() {
+  const r = await api("POST", "/api/playback/previous");
+  if (!r || r.status === "begin") return;
+  server.songId = r.id;
+  audio.dataset.songId = r.id;
+  audio.src = "/api/stream/" + encodeURIComponent(r.id);
+  audio.load();
+  if (server.isPlaying) { try { await audio.play(); } catch (e) {} }
+  refreshProgress();
+}
+
+// 在进度条上点击 / 拖动跳转
+function seekFromEvent(e) {
+  const rect = $("bar").getBoundingClientRect();
+  const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  const tot = totalSeconds();
+  const pos = Math.round(ratio * tot);
+  if (audio.dataset.songId) {
+    audio.currentTime = pos;
+  }
+  api("POST", "/api/playback/seek?position=" + pos);
+  updateBar();
+}
+
+// ===== 曲库列表 =====
+async function loadLibrary() {
+  const list = await api("GET", "/api/music");
+  const lib = $("library");
+  if (!list || list.length === 0) {
+    lib.innerHTML = '<div class="empty-hint">曲库为空，请先扫描音乐目录</div>';
+    return;
+  }
+  lib.innerHTML = "";
+  list.forEach((song, i) => {
+    const row = document.createElement("div");
+    row.className = "lib-row";
+    row.dataset.songId = song.id;
+    const meta = song.metadata || {};
+    const title = meta.title || song.fileName || "未知";
+    const artist = meta.artist || "";
+    const dur = meta.duration ? fmt(meta.duration) : "--:--";
+    row.innerHTML =
+      '<div class="idx">' + (i + 1) + '</div>' +
+      '<div class="meta"><div class="t">' + escapeHtml(title) + '</div>' +
+      '<div class="a">' + escapeHtml(artist) + '</div></div>' +
+      '<div class="eq" style="display:none">▶</div>' +
+      '<div class="dur">' + dur + '</div>';
+    row.addEventListener("click", () => playSong(song.id));
+    lib.appendChild(row);
+  });
+  highlightCurrent();
+}
+
+function highlightCurrent() {
+  document.querySelectorAll(".lib-row").forEach((row) => {
+    const active = row.dataset.songId === server.songId;
+    row.classList.toggle("active", active);
+    const eq = row.querySelector(".eq");
+    if (eq) eq.style.display = active ? "" : "none";
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+// ===== 事件绑定 =====
+$("playBtn").addEventListener("click", togglePlay);
+$("prevBtn").addEventListener("click", gotoPrev);
+$("nextBtn").addEventListener("click", gotoNext);
+$("loadAllBtn").addEventListener("click", loadAllAndPlay);
+$("refreshBtn").addEventListener("click", loadLibrary);
+
+let seeking = false;
+$("bar").addEventListener("mousedown", (e) => { seeking = true; seekFromEvent(e); });
+window.addEventListener("mousemove", (e) => { if (seeking) seekFromEvent(e); });
+window.addEventListener("mouseup", () => { seeking = false; });
+
+audio.addEventListener("timeupdate", updateBar);
+audio.addEventListener("loadedmetadata", () => {
+  if (pendingSeek != null) {
+    try { audio.currentTime = pendingSeek; } catch (e) {}
+    pendingSeek = null;
+  }
+  updateBar();
+});
+audio.addEventListener("ended", () => { gotoNext(); });
+audio.addEventListener("play", () => { updatePlayButton(); });
+audio.addEventListener("pause", () => { updatePlayButton(); });
+
+// 每 5 分钟强制与服务端同步一次进度：拉取进度（refreshProgress 内部会回传 /sync/ack 确认）
+async function syncWithServer() {
+  await refreshProgress();
+}
+
+// ===== 启动 =====
+loadLibrary();
+refreshProgress();
+setInterval(syncWithServer, 5 * 60 * 1000);   // 每 5 分钟强制同步 + 回传 ack
+setInterval(updateBar, 250);                  // 进度条本地平滑刷新（不请求服务器）
+</script>
+</body>
+</html>

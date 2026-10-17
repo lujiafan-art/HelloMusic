@@ -21,9 +21,27 @@
         </license>
     </licenses>
 
+    <!-- 未填 <url> / <organization>：本仓库没有公开地址，也没有组织主体。
+         挂上占位值只会让 `mvn site` 生成一堆点不动的链接，不如留空。 -->
+    <developers>
+        <developer>
+            <id>lujiafan</id>
+            <name>Lu Jiafan</name>
+            <roles>
+                <role>maintainer</role>
+            </roles>
+        </developer>
+    </developers>
+
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- Mockito 在 JDK 21 上会挂载 byte-buddy 的 java agent，默认每次测试都打印一条
+             "A Java agent has been loaded dynamically" 警告；显式打开该选项即可静音。
+             后续 JDK 默认禁止动态挂载 agent，届时不加这个选项 Mockito 会直接失败。
+             只用 JDK 21+ 构建（release=21 本身就有此要求），因此不必担心选项不被识别。 -->
+        <argLine>-XX:+EnableDynamicAgentLoading</argLine>
     </properties>
 
     <parent>

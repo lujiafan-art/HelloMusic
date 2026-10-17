@@ -205,4 +205,67 @@ class PlaybackSessionTest {
         assertNull(failure.get(), () -> "并发访问不应抛异常，实际: " + failure.get());
         assertTrue(session.getCurrentIndex() >= 0 && session.getCurrentIndex() < 8);
     }
+
+    @Test
+    void shufflePreviousReturnsLastPlayedSong() {
+        PlaybackSession session = new PlaybackSession();
+        session.setPlaylist(List.of("a", "b", "c", "d", "e"));
+        session.setPlayMode(PlayMode.SHUFFLE);
+
+        // 加载后当前为 "a"（index 0），连播几首并记录播放顺序
+        String s0 = session.getCurrentSong();
+        String s1 = session.getNextSong();
+        String s2 = session.getNextSong();
+        String s3 = session.getNextSong();
+
+        // previous 应严格按时间回溯到上一首，而不是重播当前
+        assertEquals(s2, session.getPreviousSong());
+        assertEquals(s1, session.getPreviousSong());
+        assertEquals(s0, session.getPreviousSong());
+        // 历史耗尽后再 previous：重播当前（不抛异常、下标合法）
+        assertNotNull(session.getPreviousSong());
+        assertTrue(session.getCurrentIndex() >= 0 && session.getCurrentIndex() < 5);
+    }
+
+    @Test
+    void progressClockTracksPositionAndDuration() throws Exception {
+        PlaybackSession session = new PlaybackSession();
+
+        // 开始播放一首 100 秒的歌
+        session.startPlayback(100);
+        assertTrue(session.isPlaying());
+        assertEquals(100_000L, session.getDurationMillis());
+        assertTrue(session.getPositionMillis() >= 0 && session.getPositionMillis() < 1000,
+                "刚开始播放时进度应接近 0");
+
+        // 跳到第 40 秒：位置应约等于 40000ms（允许极小的时间流逝）
+        session.seekPlayback(40);
+        long afterSeek = session.getPositionMillis();
+        assertTrue(afterSeek >= 40_000 && afterSeek < 41_000,
+                "seek(40) 后进度应约 40000ms，实际: " + afterSeek);
+
+        // 暂停后进度应被固化（连续读取不变）
+        session.pausePlayback();
+        assertFalse(session.isPlaying());
+        long frozen1 = session.getPositionMillis();
+        long frozen2 = session.getPositionMillis();
+        assertEquals(frozen1, frozen2, "暂停后进度应冻结");
+
+        // 超过时长的 seek 应被收敛到歌曲总时长
+        session.startPlayback(100);
+        session.seekPlayback(9999);
+        assertEquals(100_000L, session.getPositionMillis(), "进度不应超过歌曲总时长");
+
+        // 切歌保留 playing 标志，但进度归零、时长清零
+        session.onSongChanged();
+        assertTrue(session.isPlaying(), "onSongChanged 应保留 playing 标志");
+        assertEquals(0, session.getPositionMillis());
+        assertEquals(0, session.getDurationMillis());
+
+        // 彻底重置
+        session.resetProgress();
+        assertFalse(session.isPlaying());
+        assertEquals(0, session.getPositionMillis());
+        assertEquals(0, session.getDurationMillis());
+    }
 }

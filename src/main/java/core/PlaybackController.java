@@ -22,6 +22,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -85,6 +86,41 @@ public class PlaybackController {
         return ResponseEntity.ok(current);
     }
 
+    // 开始 / 恢复播放（可选传入当前歌曲时长，单位秒）
+    @PostMapping("/play")
+    public ResponseEntity<?> play(@RequestParam(required = false) Integer duration) {
+        Map<String, Object> progress = playbackService.play(duration);
+        if (progress == null) {
+            return ResponseEntity.ok(Map.of("status", "empty"));
+        }
+        return ResponseEntity.ok(progress);
+    }
+
+    // 暂停播放
+    @PostMapping("/pause")
+    public ResponseEntity<Map<String, Object>> pause() {
+        return ResponseEntity.ok(playbackService.pause());
+    }
+
+    // 跳转到指定位置（秒）
+    @PostMapping("/seek")
+    public ResponseEntity<Map<String, Object>> seek(@RequestParam int position) {
+        return ResponseEntity.ok(playbackService.seek(position));
+    }
+
+    // 获取当前播放进度（进度条与「正在播放」展示用）
+    @GetMapping("/progress")
+    public ResponseEntity<Map<String, Object>> getProgress() {
+        return ResponseEntity.ok(playbackService.getProgress());
+    }
+
+    // 显式确认已与服务端同步播放进度（服务端 5 分钟对账用：客户端必须回传此确认）
+    @PostMapping("/sync/ack")
+    public ResponseEntity<Map<String, Object>> syncAck() {
+        playbackService.markClientSynced();
+        return ResponseEntity.ok(Map.of("status", "synced"));
+    }
+
     // 下一首
     @PostMapping("/next")
     public ResponseEntity<?> next() {
@@ -118,8 +154,22 @@ public class PlaybackController {
         if (musicIds == null || musicIds.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("error", "音乐列表不能为空"));
         }
-        playbackService.loadPlaylist(musicIds);
-        return ResponseEntity.ok(Map.of("status", "loaded", "total", playbackService.getQueue().size()));
+        int loaded = playbackService.loadPlaylist(musicIds);
+        if (loaded == 0) {
+            // 全部 ID 都不在曲库中：明确失败，而不是挂一个空队列却返回 loaded
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "没有可加载的歌曲：提交的 ID 均不在曲库中",
+                    "requested", musicIds.size()));
+        }
+        Map<String, Object> body = new HashMap<>();
+        body.put("status", "loaded");
+        body.put("total", loaded);
+        int skipped = musicIds.size() - loaded;
+        if (skipped > 0) {
+            // 只在实际有无效 ID 时才附带 skipped，减少正常响应的噪音
+            body.put("skipped", skipped);
+        }
+        return ResponseEntity.ok(body);
     }
 
     // 加载歌单到播放队列（根据歌单 ID）

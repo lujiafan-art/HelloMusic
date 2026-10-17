@@ -1,0 +1,46 @@
+name: CI
+
+# 每次推到主分支、以及每个 PR 都跑一遍完整构建 + 全部单元测试。
+# 单测里不含任何外部依赖（不联网、不读宿主机音乐目录），因此在干净的 runner 上可直接复现。
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上新的提交会让上一轮还在跑的构建自动取消，避免排队浪费
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test (JDK 21)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          # 缓存 ~/.m2/repository，依赖没变时后续构建可以跳过下载
+          cache: maven
+
+      - name: Build and run tests
+        # verify = compile + testCompile + test + package，比 test 多一步打包，
+        # 能顺带验证 spring-boot-maven-plugin 的 repackage 没有坏
+        run: mvn -B -ntp verify
+
+      - name: Upload surefire reports on failure
+        # 构建失败时把测试报告作为产物留下，否则只能靠日志里滚过去的堆栈定位
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+          if-no-files-found: ignore
+          retention-days: 7

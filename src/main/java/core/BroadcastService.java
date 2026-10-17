@@ -28,7 +28,11 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.InterfaceAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -61,21 +65,39 @@ public class BroadcastService {
         ConfigManager.Config config = configManager.getConfig();
         int broadcastPort = config.getBroadcastPort();
 
+        // 向所有非回环、已启动且有广播地址的网络接口的子网广播地址发送。
+        // 用 InterfaceAddress.getBroadcast() 由 JVM 按真实子网掩码算出广播地址，
+        // 不再假设 /24（否则在 /16 等子网里末两段需全置 1 时会漏发）。
+        boolean sent = false;
         try {
-            sendTo(InetAddress.getByName("255.255.255.255"), broadcastPort, data);
-            System.out.println("📡 Broadcast sent to 255.255.255.255:" + broadcastPort);
-        } catch (IOException e) {
-            System.err.println("❌ Broadcast failed: " + e.getMessage());
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (ni.isLoopback() || !ni.isUp()) {
+                    continue;
+                }
+                for (InterfaceAddress addr : ni.getInterfaceAddresses()) {
+                    InetAddress bc = addr.getBroadcast();
+                    if (bc != null) {
+                        try {
+                            sendTo(bc, broadcastPort, data);
+                            sent = true;
+                        } catch (IOException e) {
+                            System.err.println("❌ Broadcast to " + bc + " failed: " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        } catch (SocketException e) {
+            System.err.println("❌ 枚举网络接口失败: " + e.getMessage());
         }
 
-        // 额外向本机所在子网的广播地址发送一次，兼容不转发 255.255.255.255 的网络
-        try {
-            byte[] ip = InetAddress.getLocalHost().getAddress();
-            if (ip.length == 4) {
-                ip[3] = -1;
-                sendTo(InetAddress.getByAddress(ip), broadcastPort, data);
+        // 兜底：若没有任何子网广播地址可用，再尝试受限广播地址（部分网络会丢弃，但作为补充）
+        if (!sent) {
+            try {
+                sendTo(InetAddress.getByName("255.255.255.255"), broadcastPort, data);
+                System.out.println("📡 Broadcast sent to 255.255.255.255:" + broadcastPort);
+            } catch (IOException e) {
+                System.err.println("❌ Broadcast failed: " + e.getMessage());
             }
-        } catch (Exception ignored) {
         }
     }
 

@@ -1,9 +1,14 @@
+### 构建产物 ###
 target/
-!.mvn/wrapper/maven-wrapper.jar
 
 ### 运行时用户数据（程序写到当前工作目录，属本地状态，不应提交） ###
 hellomusic-config.json
 playlists.json
+
+### Maven Wrapper（当前未启用） ###
+# 需要时在宿主机执行 `mvn wrapper:wrapper` 生成，并把 mvnw / mvnw.cmd / .mvn/wrapper/ 一起提交。
+# 原先这里有一行 `!.mvn/wrapper/maven-wrapper.jar`，是 wrapper 生成后用来「反忽略」那个 jar 的；
+# 本仓库既没有 .mvn 目录，也没有任何规则会忽略 *.jar，属于 Initializr 留下的悬空规则，已删除。
 
 !**/src/main/**/target/
 !**/src/test/**/target/

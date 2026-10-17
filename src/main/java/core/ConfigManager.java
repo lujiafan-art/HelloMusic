@@ -39,10 +39,32 @@ public class ConfigManager {
     private static final String CONFIG_FILE = "hellomusic-config.json";
 
     /**
+     * 元数据解析的默认线程数：取可用处理器核数，至少为 1。
+     *
+     * <p>为 1 时解析退化为串行——这在单核机器上正好是合理的取值，也便于排查
+     * 「并行才出现的」问题。用户可通过配置项 {@code scanThreads} 覆盖。</p>
+     */
+    public static final int DEFAULT_SCAN_THREADS =
+            Math.max(1, Runtime.getRuntime().availableProcessors());
+
+    /** {@code scanThreads} 的上限，避免把机器压垮（也避免配置写错一个 0 就开 1000 个线程）。 */
+    public static final int MAX_SCAN_THREADS = 64;
+
+    /**
      * 当前生效的配置。每次更新都整体替换引用，用 volatile 保证扫描线程、广播线程与
      * Tomcat 请求线程都能立刻看到新值。
      */
     private volatile Config config;
+
+    /**
+     * 保护「读 config 引用 → 派生新配置 → 写回引用并落盘」这一段 read-modify-write 的锁。
+     *
+     * <p>{@link #setConfig} 与 {@link #savePlayMode} 都会改配置并写盘，必须串行化：否则两者并发时
+     * 可能各自基于旧快照算出新值、互相覆盖对方已落盘的改动（例如刚保存的播放模式被一次配置更新冲掉，
+     * 或配置字段被模式切换回滚）。锁只包住「派生 + 写回 + 落盘」这一复合步骤即可，读取方仍走
+     * volatile 的 {@code config} 引用，不受影响。</p>
+     */
+    private final Object writeLock = new Object();
 
     private final ObjectMapper objectMapper;
     private final Validator validator;
@@ -111,6 +133,7 @@ public class ConfigManager {
             case "serverPort" -> config.serverPort = null;
             case "broadcastPort" -> config.broadcastPort = null;
             case "broadcastInterval" -> config.broadcastInterval = null;
+            case "scanThreads" -> config.scanThreads = null;
             case "supportedExtensions" -> config.supportedExtensions = null;
             case "serverName" -> config.serverName = null;
             case "lastPlayMode" -> config.lastPlayMode = null;
@@ -126,6 +149,7 @@ public class ConfigManager {
         defaultConfig.setServerPort(8080);
         defaultConfig.setBroadcastPort(9999);
         defaultConfig.setBroadcastInterval(30000);
+        defaultConfig.setScanThreads(DEFAULT_SCAN_THREADS);
         defaultConfig.setSupportedExtensions(List.of("mp3", "mkv", "flac", "wav", "m4a", "ogg"));
         defaultConfig.setServerName("HelloMusic");
         defaultConfig.setLastPlayMode("FORWARD");  // 默认播放模式
@@ -134,8 +158,9 @@ public class ConfigManager {
 
     public void saveConfig() {
         try {
-            objectMapper.writerWithDefaultPrettyPrinter()
-                    .writeValue(new File(CONFIG_FILE), config);
+            // 原子写入：先写同目录临时文件再替换，避免崩溃时留下半截 JSON 导致配置被静默丢弃
+            JsonFiles.writeAtomic(objectMapper.writerWithDefaultPrettyPrinter(),
+                    new File(CONFIG_FILE), config);
             System.out.println("💾 Configuration saved to: " + CONFIG_FILE);
         } catch (IOException e) {
             System.err.println("❌ Failed to save config: " + e.getMessage());
@@ -153,8 +178,10 @@ public class ConfigManager {
      * 非法取值会被拦下并返回 400，因此这里只需处理「哪些字段要改」。
      */
     public void setConfig(Config patch) {
-        this.config = mergeInto(this.config, patch);
-        saveConfig();
+        synchronized (writeLock) {
+            this.config = mergeInto(this.config, patch);
+            saveConfig();
+        }
     }
 
     /**
@@ -181,6 +208,7 @@ public class ConfigManager {
         merged.broadcastPort = patch.broadcastPort != null ? patch.broadcastPort : base.broadcastPort;
         merged.broadcastInterval = patch.broadcastInterval != null
                 ? patch.broadcastInterval : base.broadcastInterval;
+        merged.scanThreads = patch.scanThreads != null ? patch.scanThreads : base.scanThreads;
         merged.supportedExtensions = patch.supportedExtensions != null
                 ? patch.supportedExtensions : base.supportedExtensions;
         merged.serverName = patch.serverName != null ? patch.serverName : base.serverName;
@@ -191,8 +219,15 @@ public class ConfigManager {
     // ========== 新增：播放模式持久化 ==========
 
     public void savePlayMode(String mode) {
-        config.setLastPlayMode(mode);
-        saveConfig();
+        synchronized (writeLock) {
+            // 走 mergeInto 产生新对象，而不是就地改 config 的字段：
+            // 既与 setConfig 复用同一套「只读不改共享对象」的不可变更新语义，也避免「读旧快照 + 改共享
+            // 字段 + 写盘」在并发下被另一路的 setConfig 覆盖，同时保证其它线程读到的是完整新值而非中间态。
+            Config patch = new Config();
+            patch.setLastPlayMode(mode);
+            this.config = mergeInto(this.config, patch);
+            saveConfig();
+        }
     }
 
     public String getLastPlayMode() {
@@ -227,6 +262,16 @@ public class ConfigManager {
         @Max(value = 3600000, message = "广播间隔取值范围为 1000-3600000 毫秒")
         private Integer broadcastInterval;
 
+        /**
+         * 扫描时并行解析元数据的线程数。
+         *
+         * <p>元数据解析（逐个打开文件、读取标签与音频头）是整次扫描中最重的一步，
+         * 因此单独开线程池并行执行。设为 {@code 1} 即退回串行解析。</p>
+         */
+        @Min(value = 1, message = "解析线程数取值范围为 1-64")
+        @Max(value = 64, message = "解析线程数取值范围为 1-64")
+        private Integer scanThreads;
+
         /** 参与扫描的文件扩展名（不含点号）；至少一个，元素不能是空白字符串。 */
         @Size(min = 1, message = "受支持扩展名不能为空")
         private List<@NotBlank(message = "扩展名不能是空字符串") String> supportedExtensions;
@@ -250,6 +295,8 @@ public class ConfigManager {
         public void setBroadcastInterval(Integer broadcastInterval) {
             this.broadcastInterval = broadcastInterval;
         }
+        public Integer getScanThreads() { return scanThreads; }
+        public void setScanThreads(Integer scanThreads) { this.scanThreads = scanThreads; }
         public List<String> getSupportedExtensions() { return supportedExtensions; }
         public void setSupportedExtensions(List<String> supportedExtensions) {
             this.supportedExtensions = supportedExtensions;

@@ -70,11 +70,14 @@ public class PlaylistService {
     }
 
     // 保存播放列表（到文件）
-    private void savePlaylists() {
+    // synchronized：多个请求并发改歌单时，避免两个写线程互相覆盖；
+    // 配合 JsonFiles 的原子替换，落盘内容要么是旧版本、要么是完整的新版本
+    private synchronized void savePlaylists() {
         try {
             List<Playlist> list = new ArrayList<>(playlists.values());
-            objectMapper.writerWithDefaultPrettyPrinter()
-                    .writeValue(new File(PLAYLIST_FILE), list);
+            // 原子写入：先写同目录临时文件再替换，避免崩溃时留下半截 JSON 导致整个歌单文件被静默丢弃
+            JsonFiles.writeAtomic(objectMapper.writerWithDefaultPrettyPrinter(),
+                    new File(PLAYLIST_FILE), list);
         } catch (IOException e) {
             System.err.println("❌ Failed to save playlists: " + e.getMessage());
         }
@@ -220,26 +223,27 @@ public class PlaylistService {
         if (playlist == null) {
             return false;
         }
-        playlist.getMusicIds().clear();
-        playlist.setUpdatedAt(LocalDateTime.now());
+        // getMusicIds() 返回的是只读快照，清空必须走 Playlist 自己的方法
+        playlist.clearMusic();
         savePlaylists();
         return true;
     }
 
-    // 重排序播放列表
+    /**
+     * 重排序播放列表。
+     *
+     * <p>完整排列校验下沉到 {@link Playlist#reorderMusic}（长度一致、无重复、每个 ID 都在歌单中），
+     * 这里只负责「找到歌单 → 触发重排 → 落盘」。入参不是完整排列时返回 {@code false}，
+     * 避免歌曲被静默丢弃或产生重复。</p>
+     */
     public boolean reorderPlaylist(String playlistId, List<String> musicIds) {
         Playlist playlist = playlists.get(playlistId);
         if (playlist == null) {
             return false;
         }
-        // 验证所有 ID 都存在
-        for (String id : musicIds) {
-            if (!playlist.getMusicIds().contains(id)) {
-                return false;
-            }
+        if (!playlist.reorderMusic(musicIds)) {
+            return false;
         }
-        playlist.setMusicIds(new ArrayList<>(musicIds));
-        playlist.setUpdatedAt(LocalDateTime.now());
         savePlaylists();
         return true;
     }
