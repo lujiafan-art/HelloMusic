@@ -108,12 +108,20 @@ public class UnixSocketServer {
         } catch (IOException e) {
             log.error("控制面启动失败: " + e.getMessage(), e);
         } finally {
-            cleanupSocketPath();
             connectionPool.shutdown();
         }
     }
 
-    /** 请求停止：关闭监听 channel，让 accept 循环退出。 */
+    /**
+     * 请求停止：关闭监听 channel，让 accept 循环退出，并同步删除 socket 文件。
+     *
+     * <p>删除必须在这里（关闭 channel 之后、方法返回之前）完成，而不是放在 {@link #start()}
+     * 的 {@code finally} 里：{@code finally} 运行在 accept 线程上，与 {@code stop()} 是异步的。
+     * 若 {@code stop()} 返回后新实例立即重新 {@code bind} 同一路径，旧实例的 {@code finally}
+     * 才迟迟执行删除，会把新实例刚建好的 socket 文件一并删掉——这就是「删除竞争」。放到
+     * {@code stop()} 内同步删除后，{@code stop()} 返回即意味着路径已清理干净，后续
+     * {@code start()} 可直接复用。</p>
+     */
     public void stop() {
         running.set(false);
         ServerSocketChannel server = serverChannel;
@@ -123,6 +131,7 @@ public class UnixSocketServer {
             } catch (IOException ignored) {
             }
         }
+        cleanupSocketPath();
     }
 
     /** 单个连接的处理：读一行 JSON → 分发 → 写一行 JSON 响应，直到连接关闭。 */
@@ -163,7 +172,8 @@ public class UnixSocketServer {
                     Map.of("ok", false, "error", "请求必须是 JSON 对象", "status", 400)).toString();
         }
         try {
-            return objectMapper.writeValueAsString(dispatcher.dispatch(request));
+            // Unix Socket 对端即本机进程，无 IP 语义，统一记为 "local"
+            return objectMapper.writeValueAsString(dispatcher.dispatch(request, "local"));
         } catch (IOException e) {
             return objectMapper.valueToTree(
                     Map.of("ok", false, "error", "响应序列化失败", "status", 500)).toString();
@@ -183,7 +193,7 @@ public class UnixSocketServer {
         }
     }
 
-    /** 关闭时清理 socket 文件，避免下次启动 bind 冲突。 */
+    /** 关闭时清理 socket 文件，避免下次启动 bind 冲突。仅由 {@link #stop()} 调用。 */
     private void cleanupSocketPath() {
         try {
             Files.deleteIfExists(socketPath);

@@ -22,7 +22,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetAddress;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -49,8 +48,6 @@ public class SessionRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(SessionRegistry.class);
 
-    /** 客户端必须至少每隔该时长同步一次播放进度，否则服务端记录日志。 */
-    static final long CLIENT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
     /** 起始 / 兼容会话的内部 ID（数字 0）。第一个连接的客户端分到它，兼容模式也复用它。 */
     public static final String START_SESSION_ID = "0";
     /** 兼容模式（enableHeartbeat=0）下对外暴露的会话别名，内部映射到 {@link #START_SESSION_ID}。 */
@@ -60,11 +57,11 @@ public class SessionRegistry {
 
     /** 心跳期望间隔：客户端应每这么久上报一次心跳（毫秒）。 */
     private static final long HEARTBEAT_EXPECTED_MS = 60 * 1000;
-    /** 心跳超时（连续未达该时长）→ 先暂停该会话的播放，给客户端一个「软断开」缓冲。 */
+    /** 心跳超时（连续未达该时长）→ 记为 stale（仅记录日志；服务端没有可暂停的播放状态）。 */
     private static final long SESSION_PAUSE_AFTER_MS = 2 * HEARTBEAT_EXPECTED_MS;
     /** 会话无响应超过该时长（毫秒）→ 删除会话 ID 并结束会话。 */
     private static final long SESSION_DELETE_AFTER_MS = 3 * HEARTBEAT_EXPECTED_MS;
-    /** 会话巡检周期：每 30 秒一次，统一做「心跳存活治理」与「客户端同步对账」两类检查项。 */
+    /** 会话巡检周期：每 30 秒一次，做「心跳存活治理」。 */
     private static final long SESSION_INSPECTION_PERIOD_MS = 30 * 1000;
 
     /** 每个前端客户端一个独立会话（key 为数字 ID 字符串；"0" 为起始 / 兼容会话）。 */
@@ -147,22 +144,36 @@ public class SessionRegistry {
             return r;
         }
 
+        ClientSession cs = registerSession(clientIp, remoteAddr);
+        warnIfNonLoopback(cs.getClientIp());
+        r.put("status", "connected");
+        r.put("sessionId", cs.getSessionId());
+        r.put("heartbeatEnabled", true);
+        r.put("heartbeatIntervalMs", HEARTBEAT_EXPECTED_MS);
+        r.put("sessionPauseAfterMs", SESSION_PAUSE_AFTER_MS);
+        r.put("sessionDeleteAfterMs", SESSION_DELETE_AFTER_MS);
+        log.info("[会话] 新前端已连接：sessionId=" + cs.getSessionId() + "，客户端IP=" + cs.getClientIp()
+                + "，remoteAddr=" + cs.getRemoteAddr());
+        return r;
+    }
+
+    /**
+     * 原子地「分配空闲 ID + 构造会话 + 注册进 map」。
+     *
+     * <p>必须整体持锁：若把「分配」与「{@code sessions.put}」拆成两步（分配持锁、put 在锁外），
+     * 两步之间 0 号会处于「已从空闲池取出、但尚未写回 map」的中间态。此时并发触发的
+     * {@link #startSession()} 会把「0 号不在 map」误判为「0 号空闲」，懒重建一个 legacy 会话，
+     * 与即将写入的真实会话产生 ID 冲突。整体持锁后，分配与注册相对 {@link #startSession()} 的
+     * double-checked 重建是原子的，不再有冲突窗口。</p>
+     */
+    private synchronized ClientSession registerSession(String clientIp, String remoteAddr) {
         String id = allocateSessionId();
         ClientSession cs = new ClientSession(id,
                 clientIp != null ? clientIp : "unknown",
                 remoteAddr != null ? remoteAddr : "unknown");
         // 分配 0 号时覆盖掉 legacy 起始会话，完成「转正」为真实客户端
         sessions.put(id, cs);
-        warnIfNonLoopback(cs.getClientIp());
-        r.put("status", "connected");
-        r.put("sessionId", id);
-        r.put("heartbeatEnabled", true);
-        r.put("heartbeatIntervalMs", HEARTBEAT_EXPECTED_MS);
-        r.put("sessionPauseAfterMs", SESSION_PAUSE_AFTER_MS);
-        r.put("sessionDeleteAfterMs", SESSION_DELETE_AFTER_MS);
-        log.info("[会话] 新前端已连接：sessionId=" + id + "，客户端IP=" + cs.getClientIp()
-                + "，remoteAddr=" + cs.getRemoteAddr());
-        return r;
+        return cs;
     }
 
     /**
@@ -221,10 +232,9 @@ public class SessionRegistry {
                 return false;
             }
         }
-        ClientSession removed = sessions.remove(key);
+        ClientSession removed = removeSession(key);
         if (removed != null) {
             removed.markEnded();
-            releaseSessionId(key);
             log.info("[会话] 客户端主动断开：sessionId=" + key
                     + "，客户端IP=" + removed.getClientIp());
             return true;
@@ -256,19 +266,15 @@ public class SessionRegistry {
 
     /**
      * 统一的会话巡检任务：每 {@link #SESSION_INSPECTION_PERIOD_MS} 跑一次（由外部调度器调用），
-     * 单次遍历所有前端会话，
-     * 依次执行两类检查项，避免「心跳治理」与「同步对账」各开一个定时任务、各自把 map 遍历一遍。
-     * legacy 起始会话（未被真实客户端占用）永不参与巡检。
+     * 单次遍历所有前端会话，只做「心跳存活治理」。legacy 起始会话（未被真实客户端占用）永不参与巡检。
      *
      * <ul>
-     *   <li>检查项 1 · 心跳存活治理：心跳超时先暂停其播放，超过删除阈值的结束并移除会话；</li>
-     *   <li>检查项 2 · 客户端同步对账：处于活跃播放、却长时间未与服务端同步的会话记录 WARN。
-     *       用 {@link ClientSession#getLastSyncWarnEpoch()} 做节流，保证每会话至多每
-     *       {@link #CLIENT_SYNC_INTERVAL_MS} 警告一次，巡检跑得再勤也不会刷屏。</li>
+     *   <li>心跳超时：记录一条 stale 日志（服务端没有可暂停的播放状态，不做任何状态改动）；</li>
+     *   <li>超过 {@link #SESSION_DELETE_AFTER_MS}：结束并移除会话。</li>
      * </ul>
      */
     public void inspectSessions() {
-        // 「是否启用心跳包」= 0 时后端完全放弃会话治理：不暂停、不删除、不做同步对账。
+        // 「是否启用心跳包」= 0 时后端完全放弃会话治理：不记录 stale、不删除。
         // 此时本就不存在独立前端会话（所有前端共用 0 号起始会话），巡检无事可做。
         if (!configManager.isEnableHeartbeat()) {
             return;
@@ -280,45 +286,20 @@ public class SessionRegistry {
             if (LEGACY_CLIENT_IP.equals(cs.getClientIp())) {
                 continue;
             }
-            PlaybackSession pb = cs.getPlayback();
 
-            // 先结算「已自然播完」的会话，避免「已播完但 playing 仍为 true」被误判为心跳超时：
-            // 播完的会话应在进入检查项 1 之前就把 playing 收敛为 false，从而既不产生
-            // 「已播完却记 WARN」的噪声，也保证检查项 2 的守卫看到的是自洽状态。
-            pb.stopIfEnded();
-
-            // ===== 检查项 1：心跳存活治理 =====
             long since = now - cs.getLastHeartbeatEpoch();
-            if (since >= SESSION_PAUSE_AFTER_MS && pb.isPlaying()) {
-                pb.pausePlayback();
+            if (since >= SESSION_PAUSE_AFTER_MS) {
                 log.warn("[会话] 会话 " + cs.getSessionId() + "（客户端 " + cs.getClientIp()
-                        + "）心跳超时，已暂停其播放");
+                        + "）心跳超时（" + (since / 1000) + " 秒未响应）");
             }
             if (since >= SESSION_DELETE_AFTER_MS) {
-                toRemove.add(cs.getSessionId()); // 即将删除，跳过同步对账
-                continue;
-            }
-
-            // ===== 检查项 2：客户端同步对账 =====
-            if (pb.isEmpty() || !pb.isPlaying() || !pb.hasClientSyncParticipation()) {
-                continue; // 空队列 / 已暂停 / 未参与握手：无需对账
-            }
-            long last = pb.getLastClientSyncEpochMillis();
-            boolean overdue = now - last > CLIENT_SYNC_INTERVAL_MS;
-            boolean cooldownPassed = now - cs.getLastSyncWarnEpoch() > CLIENT_SYNC_INTERVAL_MS;
-            if (overdue && cooldownPassed) {
-                cs.markSyncWarned(now);
-                log.warn("[播放同步] 客户端已超过 "
-                        + (CLIENT_SYNC_INTERVAL_MS / 60000)
-                        + " 分钟未与服务端同步播放进度（最后同步: "
-                        + Instant.ofEpochMilli(last) + "），会话: " + cs.getSessionId());
+                toRemove.add(cs.getSessionId());
             }
         }
         for (String id : toRemove) {
-            ClientSession removed = sessions.remove(id);
+            ClientSession removed = removeSession(id);
             if (removed != null) {
                 removed.markEnded();
-                releaseSessionId(id);
                 log.info("[会话] 会话 " + id + "（客户端 " + removed.getClientIp()
                         + "）超过 " + (SESSION_DELETE_AFTER_MS / 60000)
                         + " 分钟无响应，已结束并删除");
@@ -364,7 +345,14 @@ public class SessionRegistry {
         return cs != null ? cs : startSession();
     }
 
-    /** 保证起始会话（0 号）存在；被释放后按需懒重建为 legacy 兜底。 */
+    /**
+     * 保证起始会话（0 号）存在；被释放后按需懒重建为 legacy 兜底。
+     *
+     * <p>采用 double-checked locking：快速路径无锁读，慢路径在 {@code synchronized(this)} 内
+     * 复查后重建。由于「0 号」的所有写入（{@link #registerSession} 的转正覆盖、
+     * {@link #removeSession} 的移除与释放）都在同一把锁内完成，这里的复查是权威的，不会把
+     * 「已分配但尚未注册」或「已移除但尚未放回空闲池」的中间态误判为空闲而重复重建。</p>
+     */
     private ClientSession startSession() {
         ClientSession cs = sessions.get(START_SESSION_ID);
         if (cs != null) {
@@ -398,13 +386,26 @@ public class SessionRegistry {
         return String.valueOf(nextSessionId++);
     }
 
-    /** 释放会话 ID 到空闲池，供后续连接复用。 */
-    private synchronized void releaseSessionId(String id) {
-        try {
-            freeSessionIds.add(Integer.parseInt(id));
-        } catch (NumberFormatException ignored) {
-            // 会话 ID 恒为数字字符串，此处仅为防御，不应发生
+    /**
+     * 原子地「从 map 移除会话 + 把其 ID 放回空闲池」。
+     *
+     * <p>两步必须合并在同一把锁内：若先 {@code sessions.remove} 再放回空闲池（中间有窗口），
+     * 并发触发的 {@link #startSession()} 会把「0 号已不在 map」误判为「0 号空闲」而懒重建 legacy，
+     * 与即将放回空闲池的 0 号叠加，形成「0 号既被 legacy 占用、又躺在空闲池里」的双重占用——
+     * 下一个连接就会把 0 号二次分配给另一个客户端。</p>
+     *
+     * @return 被移除的会话；ID 不存在时返回 {@code null}
+     */
+    private synchronized ClientSession removeSession(String id) {
+        ClientSession removed = sessions.remove(id);
+        if (removed != null) {
+            try {
+                freeSessionIds.add(Integer.parseInt(id));
+            } catch (NumberFormatException ignored) {
+                // 会话 ID 恒为数字字符串，此处仅为防御，不应发生
+            }
         }
+        return removed;
     }
 
     /** 归一化会话 ID：兼容别名 "default" → 起始会话 "0"；null/空白 → null。 */

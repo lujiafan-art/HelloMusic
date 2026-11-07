@@ -62,8 +62,6 @@ public class ConfigManager {
     public static final int DEFAULT_MAX_QUEUE = 200;
     /** {@code maxQueueSize} 的上限，防止配置写错一个天文数字把内存吃光。 */
     public static final int MAX_MAX_QUEUE = 100_000;
-    /** 播放队列快照的保存目录（当前保留，未参与落盘；队列快照实际写入本配置文件内）。 */
-    public static final String DEFAULT_QUEUE_SAVE_PATH = "~";
     /** 扫描并读取音乐文件的目录；支持 {@code ~} 与英文逗号分隔多个。 */
     public static final String DEFAULT_MUSIC_PATH = "~/Music";
     /** 日志文件目录；文件名由 {@link #logFileName(LocalDateTime)} 按启动时间生成。 */
@@ -224,7 +222,6 @@ public class ConfigManager {
             case "lastPlayMode" -> config.lastPlayMode = null;
             case "maxQueueSize" -> config.maxQueueSize = null;
             case "autoSaveQueue" -> config.autoSaveQueue = null;
-            case "queueSavePath" -> config.queueSavePath = null;
             case "musicPaths" -> config.musicPaths = null;
             case "enableFileLog" -> config.enableFileLog = null;
             case "logPath" -> config.logPath = null;
@@ -249,7 +246,6 @@ public class ConfigManager {
         // 用户选项默认值（原 UserConfig 的 7 项迁入）
         defaultConfig.setMaxQueueSize(DEFAULT_MAX_QUEUE);
         defaultConfig.setAutoSaveQueue(0);
-        defaultConfig.setQueueSavePath(DEFAULT_QUEUE_SAVE_PATH);
         defaultConfig.setMusicPaths(new ArrayList<>(List.of(DEFAULT_MUSIC_PATH)));
         defaultConfig.setEnableFileLog(0);
         defaultConfig.setLogPath(DEFAULT_LOG_PATH);
@@ -343,7 +339,6 @@ public class ConfigManager {
         merged.currentIndex = patch.currentIndex != null ? patch.currentIndex : base.currentIndex;
         merged.maxQueueSize = patch.maxQueueSize != null ? patch.maxQueueSize : base.maxQueueSize;
         merged.autoSaveQueue = patch.autoSaveQueue != null ? patch.autoSaveQueue : base.autoSaveQueue;
-        merged.queueSavePath = patch.queueSavePath != null ? patch.queueSavePath : base.queueSavePath;
         merged.musicPaths = copyList(patch.musicPaths != null ? patch.musicPaths : base.musicPaths);
         merged.enableFileLog = patch.enableFileLog != null ? patch.enableFileLog : base.enableFileLog;
         merged.logPath = patch.logPath != null ? patch.logPath : base.logPath;
@@ -558,10 +553,6 @@ public class ConfigManager {
         @Max(value = 1, message = "是否自动保存列表只能为 0 或 1")
         private Integer autoSaveQueue;
 
-        /** 播放队列快照的保存目录（当前保留未参与落盘）。 */
-        @Pattern(regexp = ".*\\S.*", message = "保存列表的位置不能是空字符串或纯空白")
-        private String queueSavePath;
-
         /** 扫描并读取音乐文件的目录列表；至少一个，元素不能是空白字符串。 */
         @Size(min = 1, message = "读取音乐的位置不能为空")
         private List<@NotBlank(message = "音乐目录不能是空字符串") String> musicPaths;
@@ -612,8 +603,6 @@ public class ConfigManager {
         public void setMaxQueueSize(Integer maxQueueSize) { this.maxQueueSize = maxQueueSize; }
         public Integer getAutoSaveQueue() { return autoSaveQueue; }
         public void setAutoSaveQueue(Integer autoSaveQueue) { this.autoSaveQueue = autoSaveQueue; }
-        public String getQueueSavePath() { return queueSavePath; }
-        public void setQueueSavePath(String queueSavePath) { this.queueSavePath = queueSavePath; }
         public List<String> getMusicPaths() { return musicPaths; }
         public void setMusicPaths(List<String> musicPaths) { this.musicPaths = musicPaths; }
         public Integer getEnableFileLog() { return enableFileLog; }

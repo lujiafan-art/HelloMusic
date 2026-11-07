@@ -23,8 +23,13 @@ import org.apache.commons.io.FilenameUtils;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystemLoopException;
+import java.nio.file.FileVisitOption;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -196,8 +201,13 @@ public class MusicScannerService {
      * 串行遍历所有音乐库目录，收集候选文件路径。
      *
      * <p>目录遍历只做 stat、开销远小于元数据解析，因此保持串行：一是不必为它引入并发复杂度，
-     * 二是 {@code Files.walk} 的底层 DirectoryStream 不支持并发切分，强行并行会抛
+     * 二是 {@code Files.walkFileTree} 不支持并发切分，强行并行会抛
      * {@code ClosedDirectoryStreamException} 之类的异常。</p>
+     *
+     * <p><b>跟随符号链接</b>：以 {@link FileVisitOption#FOLLOW_LINKS} 遍历，因此无论是音乐库
+     * 路径本身是目录符号链接、目录内嵌套的目录符号链接，还是指向单个音乐文件的符号链接，
+     * 都能被正常收录。循环链接（指向祖先目录）由 {@code visitFileFailed} 就地跳过、不会中断
+     * 整次遍历；断链因不是常规文件而被自然过滤。</p>
      */
     private List<Path> collectCandidates(List<Path> libraryPaths, List<String> extensions) {
         List<Path> candidates = new ArrayList<>();
@@ -206,10 +216,30 @@ public class MusicScannerService {
                 log.warn("无效的音乐库路径: " + path);
                 continue;
             }
-            try (var stream = Files.walk(path)) {
-                stream.filter(Files::isRegularFile)
-                        .filter(file -> isSupportedExtension(file, extensions))
-                        .forEach(candidates::add);
+            try {
+                Files.walkFileTree(path, EnumSet.of(FileVisitOption.FOLLOW_LINKS), Integer.MAX_VALUE,
+                        new SimpleFileVisitor<>() {
+                            @Override
+                            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                                // attrs 是「跟随链接」读取的：符号链接指向常规文件时 isRegularFile 为 true
+                                if (attrs.isRegularFile() && isSupportedExtension(file, extensions)) {
+                                    candidates.add(file);
+                                }
+                                return FileVisitResult.CONTINUE;
+                            }
+
+                            @Override
+                            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                                // 循环链接：只跳过该子树、继续遍历其余部分，避免一次循环拖垮整次扫描
+                                if (exc instanceof FileSystemLoopException) {
+                                    log.warn("检测到符号链接循环，已跳过: " + file);
+                                    return FileVisitResult.CONTINUE;
+                                }
+                                // 断链 / 权限不足等：静默跳过（这些本就不是可播放文件）
+                                log.debug("跳过无法访问的文件: " + file + " - " + exc.getMessage());
+                                return FileVisitResult.CONTINUE;
+                            }
+                        });
             } catch (Exception e) {
                 log.warn("扫描目录出错: " + path + " - " + e.getMessage());
             }

@@ -37,7 +37,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * HTTP 控制面（TCP 包装）测试：验证 {@code POST /control} 把 JSON 请求转发给
+ * HTTP 控制面测试：验证 {@code POST /control} 把 JSON 请求转发给
  * {@link CommandDispatcher}，并把响应里的 {@code status} 字段映射为真实的 HTTP 状态码。
  *
  * <p>用 {@code mock(CommandDispatcher.class)} 隔离开真实业务，只测传输层行为；
@@ -58,7 +58,7 @@ class HttpGatewayTest {
     @Test
     void controlEndpointDispatchesAndReturns200() throws Exception {
         CommandDispatcher dispatcher = mock(CommandDispatcher.class);
-        when(dispatcher.dispatch(any(JsonNode.class)))
+        when(dispatcher.dispatch(any(JsonNode.class), any()))
                 .thenReturn(Map.of("ok", true, "data", Map.of("name", "HelloMusic")));
 
         HttpResponse<String> resp = postTo(gatewayAt(dispatcher), "{\"cmd\":\"info\"}");
@@ -72,7 +72,7 @@ class HttpGatewayTest {
     @Test
     void controlEndpointMapsErrorStatusToHttpCode() throws Exception {
         CommandDispatcher dispatcher = mock(CommandDispatcher.class);
-        when(dispatcher.dispatch(any(JsonNode.class)))
+        when(dispatcher.dispatch(any(JsonNode.class), any()))
                 .thenReturn(Map.of("ok", false, "error", "unknown", "status", 404));
 
         HttpResponse<String> resp = postTo(gatewayAt(dispatcher), "{\"cmd\":\"music.get\",\"id\":\"nope\"}");

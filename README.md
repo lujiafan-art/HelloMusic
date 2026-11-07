@@ -7,12 +7,12 @@
 
 > 本项目由 AI 辅助生成 —— 基于深度求索（DeepSeek）AI 模型，通过自然语言对话完成完整项目开发。
 
-扫描本机的音乐目录，提取标签与时长，在局域网里用 UDP 广播自我通告。**完全脱离 Spring**，纯 JDK 21 实现：**对外统一走 HTTP**，控制面内部用 Unix Socket 承载、再套一层 TCP/HTTP 包装 ——
+扫描本机的音乐目录，提取标签与时长，在局域网里用 UDP 广播自我通告。**完全脱离 Spring**，纯 JDK 21 实现：**对外统一走 HTTP**，控制面同时提供两条**对等**通道 ——
 
-- **控制面 · Unix Socket + TCP 包装**：本机客户端通过 Unix domain socket 走 **JSON 行协议**（每请求一行 JSON、每响应一行 JSON），零 TCP/IP 协议栈、内核零拷贝、不占端口；局域网 / 远程客户端则通过 **HTTP `POST /control`**（TCP 包装）走**同一条命令分发链路**；
+- **控制面 · 双通道（对等）**：本机客户端通过 Unix domain socket 走 **JSON 行协议**（每请求一行 JSON、每响应一行 JSON），零 TCP/IP 协议栈、内核零拷贝、不占端口；局域网 / 远程客户端通过 **HTTP `POST /control`** 走**同一条命令分发链路**，命令集与权限完全一致、且**默认无鉴权**；
 - **数据面 · HTTP**：浏览器 `<audio>` 与局域网播放器通过 JDK 内置 `com.sun.net.httpserver` 拉取**音频流 / 封面 / 歌词**三个只读媒体端点（支持 HTTP Range 拖动）。
 
-控制面与数据面共用一个 HTTP 门（`com.sun.net.httpserver`），因此**对外就是一组 HTTP 端点**：`POST /control` + `GET /stream /cover /lyrics`。没有数据库、没有前端构建、没有外部服务依赖，`java -jar` 一条命令就能跑起来。
+控制面与数据面共用一个 HTTP 门（`com.sun.net.httpserver`），因此**对外就是一组 HTTP 端点**：`POST /control` + `GET /stream /cover /lyrics`。没有数据库、没有前端构建、没有外部服务依赖，`java -jar` 一条命令就能跑起来。⚠️ 注意：`POST /control` 网络可达且无鉴权，任何能访问该端口的客户端都能执行全部控制命令（详见[安全提示](#安全提示)）。
 
 ---
 
@@ -43,11 +43,11 @@
 ## 架构总览
 
 ```
-  本机客户端 ──Unix Socket──▶┐   ┌──────────────────────────────┐
-  (JSON 行协议)              ├─▶│  控制面（CommandDispatcher 路由） │──▶ 播放/会话/队列/歌单/扫描/配置
-                             │   │  · UnixSocketServer（本机）     │
-  局域网/远程 ──HTTP──▶       │   │  · HttpGateway /control（TCP 包装）│
-  (POST /control) ────────────┘   └──────────────────────────────┘
+  本机客户端 ──Unix Socket──▶┐   ┌─────────────────────────────────┐
+  (JSON 行协议，仅本机)        ├─▶│  控制面（CommandDispatcher 路由）  │──▶ 播放/会话/队列/歌单/扫描/配置
+                             │   │  · UnixSocketServer（本机）        │
+  局域网/远程 ──HTTP──▶       │   │  · HttpGateway /control（无鉴权）  │
+  (POST /control，无鉴权) ─────┘   └─────────────────────────────────┘
 
   浏览器 <audio> ──HTTP──▶  ┌──────────────────────────────┐
   (Range 拖动) ───────────▶ │  HttpGateway 数据面           │──▶ 音频字节 / 封面图 / 歌词文本
@@ -57,7 +57,8 @@
                                UDP 广播（255.255.255.255 + 子网）
 ```
 
-- **控制面**与**数据面**完全解耦：业务状态（会话、队列、播放、歌单、配置）只能通过 `CommandDispatcher` 修改；它同时被 Unix Socket（本机，JSON 行协议）与 HTTP `POST /control`（TCP 包装）两条传输层调用。
+- **控制面**与**数据面**完全解耦：业务状态（会话、队列、播放、歌单、配置）只能通过 `CommandDispatcher` 修改；它同时被 Unix Socket（本机，JSON 行协议）与 HTTP `POST /control`（网络可达）两条**对等**传输层调用——HTTP 不是 Unix Socket 的「兼容包装」，而是能执行全部命令的完整控制入口。
+- ⚠️ **风险提示**：HTTP `POST /control` 默认监听所有网卡、**无任何鉴权**，任何能访问该端口的客户端都能改配置、清队列、删歌单；Unix Socket 则仅限本机进程（由 socket 文件权限控制）。两者权限不对等，详见[安全提示](#安全提示)。
 - 音频流、封面、歌词是「数据」，不涉及业务状态，因此留在 HTTP 数据面供浏览器直接消费。
 - 两条控制通道与数据面共享同一套会话、队列与播放状态（同一个进程内的对象图）。
 
@@ -67,7 +68,7 @@
 
 | 功能 | 说明 |
 | --- | --- |
-| 自动扫描 | 递归扫描配置的音乐库目录，按扩展名过滤（默认 MP3、FLAC、WAV、M4A、OGG、MKV） |
+| 自动扫描 | 递归扫描配置的音乐库目录，按扩展名过滤（默认 MP3、FLAC、WAV、M4A、OGG、MKV）；**跟随符号链接**——目录链接、文件链接均可收录，循环链接自动跳过 |
 | 增量扫描 | 按「绝对路径 + 文件大小 + 修改时间」判断文件是否变过：没变的直接复用上次解析结果，只有新增或改动过的文件才会被重新读取 |
 | 并行解析 | 目录遍历与指纹比对串行、元数据解析并行：线程数默认取 CPU 核数，可用 `scanThreads` 调整（设为 `1` 退回串行） |
 | 稳定 ID | 用文件绝对路径生成 UUID（`nameUUIDFromBytes`），重启或重新扫描后 ID 不变 |
@@ -77,7 +78,7 @@
 | 流式播放 | `/stream/{id}` 支持 HTTP Range，可拖动进度条，返回 `206 Partial Content` |
 | 网络广播 | UDP 广播自我通告，同时发往 `255.255.255.255` 与本机子网广播地址 |
 | 控制面命令 | 会话、播放、队列、音乐库、歌单、系统六组命令；本机走 Unix Socket 行协议、远程走 HTTP `POST /control` |
-| Unix Socket + HTTP | 控制面双通道：本机经 Unix domain socket 走 JSON 行协议（零网络协议栈、不占端口），局域网/远程经 HTTP `POST /control`（TCP 包装）访问同一条命令分发链路 |
+| Unix Socket + HTTP | 控制面双通道：本机经 Unix domain socket 走 JSON 行协议（零网络协议栈、不占端口），局域网/远程经 HTTP `POST /control` 访问同一条命令分发链路（**默认无鉴权**） |
 | 播放列表 | 创建/改名/删除歌单，增删歌曲、批量添加、重排序，持久化到 `playlists.json` |
 | 封面与歌词 | 按歌曲返回内嵌封面图（`/cover/{id}`，回退同目录同名图片）与歌词文本（`/lyrics/{id}`，回退同目录 `.lrc`） |
 | 播放控制 | 正向、逆向、单曲循环、随机四种模式，可切换并自动持久化 |
@@ -85,12 +86,9 @@
 | 配置持久化 | 配置与上次播放模式写入 `hellomusic-config.json`，重启不丢 |
 | 队列持久化 | 播放队列与播放位置写入 `hellomusic-config.json`，重启后自动恢复上次听歌现场 |
 | 定时刷新 | 启动时同步扫描一次，之后按 `rescanInterval` 自动重扫（默认 5 分钟）；重扫是增量的，只会处理新增与改动过的文件，也可随时 `scan` 手动重扫 |
-| 播放进度时钟 | 服务端持有**权威播放时钟**（按自身墙钟推算当前秒数），提供 `play` / `pause` / `seek` / `progress` 等命令 |
 | SHUFFLE 历史 | 随机模式维护播放历史栈，使"上一首"真正回溯（而非重播当前） |
-| 两段式播放握手 | 客户端先 `prepare`（服务端预载首段缓冲、返回 `ready`，不起时钟）→ 阻塞等待 `start`（服务端才起权威时钟、返回 `serverTime`）；客户端仅在此刻以 `serverTime` 为基线播放，杜绝进度条 0.00m 基线漂移 |
 | 预缓冲加速 | "准备"阶段把歌曲开头 1MB 载入内存（有界 LRU 缓存），首段 Range 请求直接从内存返回，降低起始播放延迟 |
-| 客户端同步对账 | 服务端每 5 分钟校验客户端是否同步播放进度；未同步则记录 WARN 日志。服务端不主动推送任何进度 |
-| 前端会话 / 心跳 | 每个客户端通过「连接」创建独立会话，服务端分配**数字 sessionId**（`0` 起始、递增，会话断开/超时后复用最小空闲数字），各自拥有独立队列与播放进度；每 1 分钟上报心跳，服务端超时先暂停其播放、超过 3 分钟无响应则结束并删除会话，多端互不串台 |
+| 前端会话 / 心跳 | 每个客户端通过「连接」创建独立会话，服务端分配**数字 sessionId**（`0` 起始、递增，会话断开/超时后复用最小空闲数字），各自拥有独立队列；每 1 分钟上报心跳，服务端超时记为 stale（仅记录日志）、超过 3 分钟无响应则结束并删除会话，多端互不串台 |
 
 ---
 
@@ -145,9 +143,9 @@ java -jar target/HelloMusic.jar
 
 ### 客户端连接控制面
 
-控制面有两条等价通道，命令协议完全一致（见[控制面命令](#控制面命令)）：
+控制面有两条对等通道，命令协议完全一致（见[控制面命令](#控制面命令)）：
 
-**远程 / 局域网（HTTP，TCP 包装）** —— 用 `curl` 发普通 HTTP 请求即可：
+**远程 / 局域网（HTTP `POST /control`）** —— 用 `curl` 发普通 HTTP 请求即可（默认无鉴权）：
 
 ```bash
 curl -X POST -H 'Content-Type: application/json' \
@@ -191,7 +189,6 @@ print(s.recv(4096).decode())
   "serverName" : "HelloMusic",
   "maxQueueSize" : 200,
   "autoSaveQueue" : 0,
-  "queueSavePath" : "~",
   "musicPaths" : [ "~/Music" ],
   "enableFileLog" : 0,
   "logPath" : "~/.local/share/HelloMusic/logs",
@@ -214,8 +211,7 @@ print(s.recv(4096).decode())
 | `serverName` | String | `"HelloMusic"` | 立即 | 广播中通告的服务器名 |
 | `maxQueueSize` | int | `200` | 加载 / 添加时 | 播放队列上限，超出部分丢弃；取值 1-100000 |
 | `autoSaveQueue` | 0/1 | `0` | 切歌 / 加载时 | 是否把播放队列落盘，重启后恢复上次现场（0=否，1=是） |
-| `queueSavePath` | String | `~` | — | 队列快照保存目录（当前保留；队列快照实际写入本文件内 `playbackQueue`） |
-| `musicPaths` | String[] | `["~/Music"]` | 下次扫描 | 扫描并读取音乐文件的目录，可写多个（支持 `~`）；**音乐库目录的唯一来源** |
+| `musicPaths` | String[] | `["~/Music"]` | 下次扫描 | 扫描并读取音乐文件的目录，可写多个（支持 `~`），路径本身可为目录符号链接；**音乐库目录的唯一来源** |
 | `enableFileLog` | 0/1 | `0` | **需重启** | 是否把日志**额外**写入文件（控制台始终保留；0=否，1=是） |
 | `logPath` | String | `~/.local/share/HelloMusic/logs` | **需重启** | 日志目录，文件名格式 `日期-启动时间.txt` |
 | `enableHeartbeat` | 0/1 | `1` | **需重启** | 是否启用心跳包（见下方说明） |
@@ -240,14 +236,14 @@ print(s.recv(4096).decode())
 | `maxQueueSize` | 1 - 100000 |
 | `autoSaveQueue` / `enableFileLog` / `enableHeartbeat` | 0 或 1 |
 | `musicPaths` | 至少一个，元素不能是空字符串 |
-| `queueSavePath` / `logPath` / `unixSocketPath` | 不能为空或纯空白 |
+| `logPath` / `unixSocketPath` | 不能为空或纯空白 |
 
 读取配置文件时同样做一次体检：非法项**回退为默认值**并在启动日志里告警，不会让服务带着坏配置启动。
 
 ### 关于「是否启用心跳包」
 
-- `1`（默认）：客户端每 60 秒上报心跳；服务端每前端一个独立会话，超时先暂停其播放，超过 3 分钟无响应则删除该会话。
-- `0`：不建立持续连接。后端**完全放弃会话治理**（不因超时暂停或删除），且**只有一个会话**——内部为起始会话 `0`，对外返回 `default` 作为会话别名；所有前端共用同一份队列与播放进度，不支持多会话。
+- `1`（默认）：客户端每 60 秒上报心跳；服务端每前端一个独立会话，超时记为 stale（仅记录日志），超过 3 分钟无响应则删除该会话。
+- `0`：不建立持续连接。后端**完全放弃会话治理**（不记录 stale、不删除），且**只有一个会话**——内部为起始会话 `0`，对外返回 `default` 作为会话别名；所有前端共用同一份队列，不支持多会话。
 
 ### 修改配置的两种方式
 
@@ -281,7 +277,7 @@ curl -X POST -H 'Content-Type: application/json' \
 
 控制面命令是**一个 JSON 对象**（必含 `"cmd"` 字段，其余字段为该命令参数），有两条等价通道：
 
-- **HTTP（TCP 包装）**：`POST /control`，请求体与响应体就是该 JSON 对象，失败时 HTTP 状态码与 JSON 里的 `status` 字段一致；
+- **HTTP**：`POST /control`，请求体与响应体就是该 JSON 对象，失败时 HTTP 状态码与 JSON 里的 `status` 字段一致；
 - **Unix Socket（本机）**：JSON 行协议 —— 每请求一行 JSON（以 `\n` 结尾），每响应一行 JSON。
 
 **请求**：
@@ -309,7 +305,7 @@ curl -X POST -H 'Content-Type: application/json' \
 
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |
-| `connect` | `clientIp` | 创建独立会话并返回 `{sessionId, heartbeatIntervalMs, sessionPauseAfterMs, sessionDeleteAfterMs}`；`sessionId` 为数字 ID（`0` 起始、递增、复用最小空闲） |
+| `connect` | `clientIp` | 创建独立会话并返回 `{sessionId, heartbeatIntervalMs, sessionPauseAfterMs, sessionDeleteAfterMs}`；`sessionId` 为数字 ID（`0` 起始、递增、复用最小空闲）。对端地址 `remoteAddr` 由服务端观测记录（HTTP 为对端 IP、Unix Socket 为 `local`），`clientIp` 仅作客户端自报的展示字段 |
 | `heartbeat` | `sessionId` | 客户端每 `heartbeatIntervalMs` 上报一次以保活；会话不存在 → 404 |
 | `disconnect` | `sessionId` | 客户端主动**关闭会话**：结束并移除会话（无需等超时），其数字 ID 释放回空闲池供复用 |
 | `session.status` | `sessionId` | 查询会话存活状态（最后心跳、距上次心跳毫秒、阈值） |
@@ -327,16 +323,14 @@ curl -X POST -H 'Content-Type: application/json' \
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |
 | `current` | `sessionId` | 当前歌曲；队列为空 → `{"status":"empty"}` |
-| `next` | `sessionId` | 下一首；队列为空 → `{"status":"end"}`。常与 `play` 连用：先 `next` 切歌，再 `play` 启动新歌的播放时钟 |
+| `next` | `sessionId` | 下一首；队列为空 → `{"status":"end"}` |
 | `previous` | `sessionId` | 上一首；队列为空 → `{"status":"begin"}` |
-| `select` | `musicId`, `sessionId` | 在现有队列中**选播**指定歌曲：定位到该曲并从 0 开始播放，**不会清空队列里的其它歌曲**；歌曲不存在 → 400 |
-| `prepare` | `musicId`, `sessionId` | 播放握手·阶段一：服务端预载歌曲首段缓冲、定位到该曲，返回 `ready` 但**不启动权威时钟**（歌曲不存在 → 400） |
-| `start` | `sessionId` | 播放握手·阶段二：服务端此刻才启动权威时钟，返回 `status=started`、`position`（起始偏移秒）与 `serverTime`（权威 epoch 毫秒）。未先 prepare → 409 |
-| `play` | `duration`, `sessionId` | 开始/恢复播放（便捷入口，等价于 prepare+start 合并）；可选 `duration`（秒）让服务端同步当前歌曲总时长 |
-| `pause` | `sessionId` | 暂停播放，进度冻结在当前位置（同时告知服务端，服务端据此记为一次同步） |
-| `seek` | `position`, `sessionId` | 跳转到指定秒数；越界自动收敛到 `[0, duration]`（客户端发起的位置推送，服务端记为一次同步） |
-| `progress` | `sessionId` | 拉取当前播放进度快照（服务端权威时钟，**纯拉取**，本身不计入同步确认）；`status=playing` 时附 `serverTime` 供客户端重锚进度基线 |
-| `sync.ack` | `sessionId` | 显式回传「已同步」确认（**这是唯一让服务端记为「已同步」的方式**）；返回 `{"status":"synced"}` |
+| `select` | `musicId`, `sessionId` | 在现有队列中**选播**指定歌曲：定位到该曲，**不会清空队列里的其它歌曲**；歌曲不存在 → 400 |
+| `prepare` | `musicId`, `sessionId` | 服务端预载歌曲首段缓冲、定位到该曲，返回 `ready` 快照（歌曲不存在 → 400） |
+| `play` | `duration`, `sessionId` | 开始/恢复播放；可选 `duration`（秒）让服务端记录当前歌曲总时长（仅作元数据展示） |
+| `pause` | `sessionId` | 暂停播放。位置归客户端，服务端不持有时钟，此处仅返回当前歌曲元数据快照 |
+| `seek` | `position`, `sessionId` | 客户端自行跳转到指定秒数；服务端不持有时钟，此处仅返回当前歌曲元数据快照 |
+| `progress` | `sessionId` | 拉取当前歌曲元数据快照（songId / title / artist / album / duration / playMode），**不含实时位置**——位置归客户端（audio.currentTime） |
 
 **`progress` 响应结构**（仅在客户端显式请求时返回；服务端任何广播/推送都不携带进度）：
 
@@ -344,25 +338,18 @@ curl -X POST -H 'Content-Type: application/json' \
 {
   "ok": true,
   "data": {
-    "status": "playing",
+    "status": "unknown",
     "songId": "9f0c2c6e-...",
     "title": "稻香",
     "artist": "周杰伦",
     "album": "魔杰座",
-    "position": 42.3,
     "duration": 223,
-    "isPlaying": true,
-    "percent": 18.97,
-    "playMode": "正向播放",
-    "lastSyncedAt": 1786000420000,
-    "syncDueAt": 1786000720000
+    "playMode": "正向播放"
   }
 }
 ```
 
-> `position` 为**自当前歌曲开始播放起**的偏移秒数（0 起，到 `duration` 止）；`status` 取 `playing` / `paused` / `empty` / `ready` / `started`；`lastSyncedAt` / `syncDueAt` 为客户端同步对账的 epoch 毫秒。
->
-> **同步对账（重要）**：服务端是进度唯一权威来源，但**绝不主动推送**进度。同步确认**只能由客户端显式 `sync.ack` 完成**（拉取 `progress` 本身不计入确认）。播放走**两段式握手**（`prepare` → `start`），以避免客户端本地进度基线与服务端权威基线不一致。服务端每 30 秒做一次会话巡检，若某**活跃播放**会话超过 5 分钟未收到 `sync.ack`，则记录 WARN 日志（以 `lastSyncWarnEpoch` 节流，每会话至多每 5 分钟警告一次）。
+> `progress` 返回的是**歌曲元数据**，不含实时位置。`status` 取 `empty`（队列为空）或 `unknown`（有当前歌曲、但服务端不推算播放位置）；`duration` 为当前歌曲总时长（秒，0 表示未知）。位置归客户端——浏览器用 `audio.currentTime` 自行维护，服务端不持有时钟、不推算「现在播到第几秒」。
 
 ### 队列
 
@@ -373,8 +360,8 @@ curl -X POST -H 'Content-Type: application/json' \
 | `load.playlist` | `playlistId`, `sessionId` | 按歌单载入；歌单不存在或过滤后为空 → 400 |
 | `queue` | `sessionId` | `{playMode, currentIndex, total, isEmpty, currentSong}` |
 | `queue.clear` | `sessionId` | 清空队列 |
-| `queue.add` | `musicId`, `sessionId` | 追加单曲；歌曲不存在 → 400，队列已满 → 409 |
-| `queue.add.batch` | `musicIds`, `sessionId` | 批量追加，返回实际追加数 |
+| `queue.add` | `musicId`, `sessionId` | 追加单曲（去重）；歌曲不存在 → 400，歌曲已在队列 → 409，队列已满 → 409 |
+| `queue.add.batch` | `musicIds`, `sessionId` | 批量追加，返回实际追加数（响应含 `count` 新增 / `invalid` 无效 / `duplicate` 已在队列 / `dropped` 队列满） |
 
 ### 音乐库
 
@@ -461,11 +448,11 @@ $BASE --data '{"cmd":"next"}'
 
 ## HTTP 端点
 
-对外只有一扇 HTTP 门（JDK 内置 `com.sun.net.httpserver`），承载**控制面 TCP 包装**与**只读数据面**两类内容：
+对外只有一扇 HTTP 门（JDK 内置 `com.sun.net.httpserver`），承载**控制面（HTTP `POST /control`）**与**只读数据面**两类内容：
 
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
-| `/control` | `POST` | 控制面 TCP 包装：请求体为命令 JSON（见[控制面命令](#控制面命令)），响应体同命令协议，HTTP 状态码镜像 `status` 字段 |
+| `/control` | `POST` | 控制面 HTTP 入口（**默认无鉴权**）：请求体为命令 JSON（见[控制面命令](#控制面命令)），响应体同命令协议，HTTP 状态码镜像 `status` 字段 |
 | `/stream/{id}` | `GET` | 流式播放，支持 `Range`（`206 Partial Content`）；不支持的范围 → 416；歌曲或文件不存在 → 404 |
 | `/cover/{id}` | `GET` | 歌曲封面图（内嵌封面优先，回退同目录同名 `jpg/jpeg/png`）；无封面 → 404 |
 | `/lyrics/{id}` | `GET` | 歌曲歌词纯文本（内嵌 USLT 优先，回退同目录同名 `.lrc`）；无歌词 → 404 |
@@ -578,7 +565,7 @@ HelloMusic/
 │   ├── LoggingInstaller.java        # 按配置为 logback 挂载文件 appender（启动前安装）
 │   ├── CommandDispatcher.java       # 控制面命令路由：唯一入口，与传输层无关
 │   ├── UnixSocketServer.java        # 控制面·本机通道：Unix Socket + JSON 行协议
-│   ├── HttpGateway.java             # 统一 HTTP 门：控制面 TCP 包装（POST /control）+ 数据面 /stream /cover /lyrics（支持 Range）
+│   ├── HttpGateway.java             # 统一 HTTP 门：控制面 POST /control + 数据面 /stream /cover /lyrics（支持 Range）
 │   ├── PreloadService.java          # 歌曲首段预缓冲（流缓存）：prepare 预载、stream 命中共享 LRU
 │   ├── Playlist.java                # 歌单模型
 │   ├── PlaylistService.java         # 歌单服务（含 JSON 持久化）
@@ -588,7 +575,7 @@ HelloMusic/
 │   ├── SessionRegistry.java         # 会话注册表：连接/心跳/断开/巡检
 │   ├── QueueManager.java            # 队列管理：加载/追加/清空/落盘
 │   ├── ProgressMapper.java          # 进度快照组装
-│   ├── PlaybackEngine.java          # 播放引擎：play/pause/seek/next/previous/两段式握手
+│   ├── PlaybackEngine.java          # 播放引擎：play/pause/seek/next/previous（不持有时钟）
 │   └── PlaybackService.java         # 多会话管理、模式持久化、连接/心跳/超时治理（薄门面）
 ├── src/test/java/core/
 │   ├── PlaybackSessionTest.java
@@ -633,7 +620,7 @@ HelloMusic/
 
 这几条是重构后定下的分层与日志规范，新增代码请遵循：
 
-**控制面 / 数据面分离**：业务状态（会话、队列、播放、歌单、配置）只能通过 `CommandDispatcher` 的命令入口修改；数据面 `HttpGateway` 的媒体端点（流 / 封面 / 歌词）是**只读媒体服务**，绝不写业务状态。`CommandDispatcher` 与传输层无关——本机走 Unix Socket（JSON 行协议），远程走 HTTP `POST /control`（TCP 包装），两条通道共享同一份对象图。
+**控制面 / 数据面分离**：业务状态（会话、队列、播放、歌单、配置）只能通过 `CommandDispatcher` 的命令入口修改；数据面 `HttpGateway` 的媒体端点（流 / 封面 / 歌词）是**只读媒体服务**，绝不写业务状态。`CommandDispatcher` 与传输层无关——本机走 Unix Socket（JSON 行协议），远程走 HTTP `POST /control`，两条通道共享同一份对象图。
 
 **分层依赖方向**：`CommandDispatcher → Service → 无`。Service 之间可以互相依赖，但**不得反向依赖命令分发或数据面**——预缓冲逻辑因此独立为 `PreloadService`，控制面（`prepare` 预载）与数据面（`stream` 命中）共享同一单例缓存。
 
@@ -642,6 +629,8 @@ HelloMusic/
 **歌曲显示名只有一份实现**：`MusicFile.displayTitle()` / `titleArtist()` 统一处理「元数据优先、占位符 `Unknown Title`/`Unknown Artist` 视为缺失、回退文件名」的规则。不要在别处重复拼装「标题 - 艺术家」。
 
 **JSON 序列化只有一份配置**：统一走 `Json.newMapper()`（注册 `JavaTimeModule`、关闭日期时间戳数组化），不要到处 `new ObjectMapper()`。
+
+**播放位置归客户端**：服务器不持有时钟、不推算「现在播到第几秒」。`progress` 返回的是元数据（歌曲、时长、模式），不含实时位置。历史上曾为此引入服务端时钟，在 CLI 移除后成为死代码，已删除。需要位置能力的客户端应自行维护 `audio.currentTime`；若未来需要服务端感知位置，走「上报 + 最后已知快照」，不要复活服务器时钟。
 
 ---
 
@@ -669,9 +658,9 @@ CI 配置见 `.github/workflows/ci.yml`——推送到 `main`/`master` 或提交
 | `MetadataExtractorTest` | 标签缺失时按「艺术家 - 标题」解析文件名 |
 | `Mp3DurationParserTest` | CBR 估算、Xing(VBR) 头部解析、ID3v2 跳过、异常输入返回 0 |
 | `ConfigManagerTest` | `config.set` 的合并语义（未提交字段保持原值）与字段校验约束（含 7 个用户选项） |
-| `MusicScannerServiceTest` | 递归扫描与扩展名过滤、**并行与串行结果一致**、非法库路径被跳过、文件名兜底、空目录得到空库；增量行为：**未变更文件复用上次的解析结果**（以对象身份断言）、内容或 mtime 变化则重新解析、被删除的文件从库中消失、后加入的文件被下次重扫收录 |
-| `PlaybackServiceTest` | 选播/点歌不误清队列、两段式握手（prepare→start）与权威时钟基线、未 prepare 直接 start 返回 null |
-| `SessionManagementTest` | 连接/心跳/主动关闭会话、数字 ID 递增与最小空闲复用、心跳超时先暂停后删除、起始会话 `0` 永不参与治理 |
+| `MusicScannerServiceTest` | 递归扫描与扩展名过滤、**并行与串行结果一致**、非法库路径被跳过、文件名兜底、空目录得到空库；增量行为：**未变更文件复用上次的解析结果**（以对象身份断言）、内容或 mtime 变化则重新解析、被删除的文件从库中消失、后加入的文件被下次重扫收录；符号链接：目录链接、文件链接、库路径本身为目录链接均被收录，循环链接不中断整次扫描 |
+| `PlaybackServiceTest` | 选播/点歌不误清队列、幽灵项跳过（next/previous 只查一次曲库）、progress 不含位置/时钟字段（负向守护） |
+| `SessionManagementTest` | 连接/心跳/主动关闭会话、数字 ID 递增与最小空闲复用、心跳超时 stale 后删除、起始会话 `0` 永不参与治理 |
 
 ---
 
@@ -681,7 +670,7 @@ CI 配置见 `.github/workflows/ci.yml`——推送到 `main`/`master` 或提交
 改 `hellomusic-config.json` 里的 `serverPort` 后重启（`serverPort` 是 HTTP 服务端口，控制面 + 数据面共用，需重启生效）。
 
 **扫描不到文件？**
-依次确认：库路径存在且是目录（见 `hellomusic-config.json` 的 `musicPaths`）→ 扩展名在 `supportedExtensions` 里 → 文件确实可读。日志里 `⚠️ Invalid library path` 表示路径无效。
+依次确认：库路径存在且是目录（见 `hellomusic-config.json` 的 `musicPaths`）→ 扩展名在 `supportedExtensions` 里 → 文件确实可读。日志里 `⚠️ Invalid library path` 表示路径无效。音乐文件经符号链接接入（目录链接或文件链接）也会被正常收录；若出现「检测到符号链接循环」日志，说明存在指向祖先目录的循环链接，已自动跳过、不影响其余文件。
 
 **扫描很慢？**
 扫描分三阶段：① 串行遍历目录收集候选文件，② 串行读每个文件的 size/mtime 比对指纹，③ 并行解析需要重新读取的文件。线程数见 `scanThreads`（默认取 CPU 核数，可按机器调大）。

@@ -66,6 +66,10 @@ class MusicScannerServiceTest {
     @TempDir
     Path libraryDir;
 
+    /** 用于放置「库目录之外」的真实文件，验证符号链接能跨目录收录。 */
+    @TempDir
+    Path externalDir;
+
     /** 本用例创建过的扫描器，结束时统一回收各自持有的解析线程池。 */
     private final List<MusicScannerService> created = new ArrayList<>();
 
@@ -95,6 +99,16 @@ class MusicScannerServiceTest {
         Path target = libraryDir.resolve(relativePath);
         Files.createDirectories(target.getParent());
         Files.writeString(target, "not a real audio file");
+    }
+
+    /** 创建符号链接；当前环境不支持（无权限 / 文件系统限制）时中止用例而非误报失败。 */
+    private Path symlink(Path target, Path link) {
+        try {
+            return Files.createSymbolicLink(link, target);
+        } catch (IOException | UnsupportedOperationException e) {
+            assumeTrue(false, "当前环境不支持创建符号链接: " + e.getMessage());
+            return null; // assumeTrue 已抛出 TestAbortedException，不会执行到这里
+        }
     }
 
     private Set<String> idsOf(MusicScannerService scanner) {
@@ -291,6 +305,55 @@ class MusicScannerServiceTest {
         assertEquals(3, scanner.getLibrarySize(), "重扫应收录新增文件（扩展名大小写不敏感）");
         assertTrue(byFileName(scanner).keySet().containsAll(
                 Set.of("existing.mp3", "added-later.flac", "added-later-too.MP3")));
+    }
+
+    @Test
+    void symlinkedDirectoryContentsAreScanned() throws IOException {
+        // 真实文件在库目录之外的另一个临时目录，用目录符号链接把它接入库目录
+        Files.writeString(externalDir.resolve("outside.mp3"), "not a real audio file");
+        symlink(externalDir, libraryDir.resolve("linked-dir"));
+
+        MusicScannerService scanner = newScanner(List.of(libraryDir.toString()), 2);
+        scanner.scanLibrary();
+
+        assertTrue(byFileName(scanner).keySet().contains("outside.mp3"),
+                "符号链接目录内的音乐文件应被扫描收录");
+    }
+
+    @Test
+    void libraryPathItselfBeingASymlinkToADirectoryIsScanned() throws IOException {
+        // musicPaths 里配置的路径本身就是一个指向目录的符号链接（如 ~/Music -> /mnt/data）
+        Files.writeString(externalDir.resolve("song.mp3"), "not a real audio file");
+        Path link = symlink(externalDir, libraryDir.resolve("music-link"));
+
+        MusicScannerService scanner = newScanner(List.of(link.toString()), 2);
+        scanner.scanLibrary();
+
+        assertEquals(1, scanner.getLibrarySize(), "音乐库路径本身是目录符号链接时应正常扫描");
+        assertTrue(byFileName(scanner).keySet().contains("song.mp3"));
+    }
+
+    @Test
+    void symlinkToAnIndividualMusicFileIsScanned() throws IOException {
+        Files.writeString(externalDir.resolve("song.mp3"), "not a real audio file");
+        symlink(externalDir.resolve("song.mp3"), libraryDir.resolve("linked-song.mp3"));
+
+        MusicScannerService scanner = newScanner(List.of(libraryDir.toString()), 2);
+        scanner.scanLibrary();
+
+        assertEquals(1, scanner.getLibrarySize(), "指向单个文件的符号链接应被收录");
+    }
+
+    @Test
+    void cyclicSymlinkDoesNotAbortTheWholeScan() throws IOException {
+        writeTrack("safe.mp3");
+        symlink(libraryDir, libraryDir.resolve("loop")); // 子目录链回库目录本身 → 循环
+
+        MusicScannerService scanner = newScanner(List.of(libraryDir.toString()), 2);
+        scanner.scanLibrary();
+
+        assertTrue(byFileName(scanner).keySet().contains("safe.mp3"),
+                "循环符号链接不应中断整次扫描，其余文件照常收录");
     }
 
     @Test

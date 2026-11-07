@@ -25,12 +25,15 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 播放控制引擎：play / pause / seek / next / previous / 播放模式，以及两段式握手
- * prepare + start。
+ * 播放控制引擎：play / pause / seek / next / previous / 播放模式。
  *
  * <p>原 {@link PlaybackService} 里的播放控制职责抽到本类。会话状态取自
- * {@link SessionRegistry}，进度快照委托 {@link ProgressMapper} 组装，切歌 / 准备阶段
+ * {@link SessionRegistry}，进度快照委托 {@link ProgressMapper} 组装，切歌 / 选播
  * 需要落盘队列时回调 {@link QueueManager#persistQueue(String)}。</p>
+ *
+ * <p><b>不持有时钟。</b>播放位置归客户端（浏览器用 audio.currentTime），本引擎不推算
+ * 「现在播到第几秒」；{@code play}/{@code pause}/{@code seek} 只把歌曲时长作为元数据记录
+ * （供 {@code progress} 展示），不做任何位置状态改动。</p>
  */
 public class PlaybackEngine {
 
@@ -90,56 +93,54 @@ public class PlaybackEngine {
 
     // 下一首
     public MusicFile next(String sessionId) {
+        return advanceAndCommit(sessionId, true);
+    }
+
+    // 上一首
+    public MusicFile previous(String sessionId) {
+        return advanceAndCommit(sessionId, false);
+    }
+
+    /**
+     * 前进（{@code forward=true}）或后退（{@code forward=false}）一步并提交状态。
+     *
+     * <p>游标推进与歌曲解析由 {@link PlaybackSession#advanceToNextResolved} /
+     * {@link PlaybackSession#advanceToPreviousResolved} 一次完成：对每个候选 ID 只查一次曲库，
+     * 命中即返回该曲的 {@link MusicFile}，途中遇到的「幽灵队列项」（曲库中已查不到的 ID）会被
+     * 就地移除，因此游标<strong>绝不会</strong>停在失效项上。这也消除了旧实现「校验通过后、再
+     * 重查一次曲库」的窄竞态——两次查询之间并发重扫可能把该曲移出，导致返回 null 却已推进游标。</p>
+     *
+     * @return 切到的歌曲；队列为空或全部为幽灵项时返回 {@code null}
+     */
+    private MusicFile advanceAndCommit(String sessionId, boolean forward) {
         PlaybackSession session = sessions.playbackSession(sessionId);
         String beforeId = session.getCurrentSong();
-        String nextId = session.getNextSong();
-        if (nextId == null) {
-            return null;
-        }
-        // 先解析曲库，确认真的能切过去，再提交状态（进度归零 / 落盘）。若队列里这个 ID
-        // 已在曲库中消失（幽灵队列项），不归零进度、不落盘，直接返回 null，避免「切歌失败
-        // 却把进度清零、位置已前进」的状态不一致。
-        MusicFile song = scannerService.getMusicById(nextId).orElse(null);
+        int sizeBefore = session.getSize();
+        MusicFile song = forward ? session.advanceToNextResolved(this::resolve)
+                                 : session.advanceToPreviousResolved(this::resolve);
         if (song == null) {
-            log.warn("队列中歌曲已不存在于曲库，跳过切歌: " + nextId);
-            return null;
+            return null; // 队列为空，或已全部被清理为幽灵项（此时队列已被清空）
         }
-        session.onSongChanged(); // 切歌：进度归零、时长清零（保留 playing 标志以便连续播放）
-        // 单曲循环（SINGLE）下 getNextSong 返回当前曲且下标不变：位置未真正变化，无需落盘
-        if (!nextId.equals(beforeId)) {
-            queueManager.persistQueue(sessionId); // 播放位置变了，落盘以便重启恢复
+        boolean removedGhost = session.getSize() < sizeBefore; // 本次顺手清理了幽灵项
+        boolean positionChanged = !song.getId().equals(beforeId);
+        // 播放位置变了，或队列因清理幽灵项而缩短，都落盘以便重启恢复
+        if (removedGhost || positionChanged) {
+            queueManager.persistQueue(sessionId);
         }
         syncDuration(session, song);
         return song;
     }
 
-    // 上一首
-    public MusicFile previous(String sessionId) {
-        PlaybackSession session = sessions.playbackSession(sessionId);
-        String beforeId = session.getCurrentSong();
-        String prevId = session.getPreviousSong();
-        if (prevId == null) {
-            return null;
-        }
-        MusicFile song = scannerService.getMusicById(prevId).orElse(null);
-        if (song == null) {
-            log.warn("队列中歌曲已不存在于曲库，跳过切歌: " + prevId);
-            return null;
-        }
-        session.onSongChanged(); // 切歌：进度归零、时长清零（保留 playing 标志以便连续播放）
-        // SHUFFLE 历史耗尽时 getPreviousSong 返回当前曲且下标不变（重播当前）：位置未变化，无需落盘
-        if (!prevId.equals(beforeId)) {
-            queueManager.persistQueue(sessionId); // 播放位置变了，落盘以便重启恢复
-        }
-        syncDuration(session, song);
-        return song;
+    /** 解析某 ID 为曲库实体（查不到则返回 {@code null}）；供会话层一步完成「校验 + 解析」。 */
+    private MusicFile resolve(String id) {
+        return id != null ? scannerService.getMusicById(id).orElse(null) : null;
     }
 
     // ===== 播放进度控制 =====
 
     /**
-     * 开始 / 恢复播放的核心逻辑（不含同步握手）。已暂停且进度 > 0 → 从暂停点恢复；
-     * 否则（新加载 / 从头）从 0 开始。
+     * 开始 / 恢复播放的核心逻辑。不启动任何时钟——仅把当前歌曲时长作为元数据记录，
+     * 供 {@code progress} 展示。
      */
     private Map<String, Object> applyPlay(Integer durationOverride, String sessionId) {
         PlaybackSession session = sessions.playbackSession(sessionId);
@@ -149,37 +150,24 @@ public class PlaybackEngine {
         }
         int duration = (durationOverride != null && durationOverride > 0) ? durationOverride
                 : (current.getMetadata() != null ? current.getMetadata().getDuration() : 0);
-        // 已在播放则保持时钟不打断（/play 幂等）；已暂停且有进度则续播；否则从 0 开始
-        session.startOrResumePlayback(duration);
+        session.setDurationSeconds(duration); // 仅记录元数据时长，不启动时钟
         return progressMapper.buildProgress(sessionId, session, current);
     }
 
     /**
-     * 开始 / 恢复播放（供 Web 客户端）。返回快照并在响应里加 {@code requireSync:true}，
-     * 进入同步握手：客户端必须再回传 {@code /sync/ack} 才算真正同步。
+     * 开始 / 恢复播放（供 Web 客户端）。返回当前歌曲元数据快照。位置归客户端，服务端不推算。
      *
      * @param durationOverride 当前歌曲时长（秒）；为 {@code null} 时自动从元数据取
      * @param sessionId 会话 ID；为 {@code null} 时回退到起始会话（0 号）
      * @return 进度快照；队列为空时返回 {@code null}
      */
     public Map<String, Object> play(Integer durationOverride, String sessionId) {
-        Map<String, Object> progress = applyPlay(durationOverride, sessionId);
-        if (progress == null) {
-            return null;
-        }
-        // 进入同步握手：服务端返回权威时间，但客户端必须再回传 /sync/ack 才算真正同步
-        sessions.playbackSession(sessionId).noteClientSyncParticipation();
-        progress.put("requireSync", true); // 提示客户端：已收到服务端权威时间，必须回传 /sync/ack
-        return progress;
+        return applyPlay(durationOverride, sessionId);
     }
 
     /**
-     * 播放握手·阶段一：准备播放指定歌曲。
-     *
-     * <p>服务端把歌曲的一部分载入内存以加速后续流式播放，并定位到该曲（在队列中则移到该下标，
-     * 否则追加到队尾——<strong>绝不</strong>清空或替换现有队列），但<strong>不启动</strong>权威
-     * 播放时钟。时钟要等客户端显式调用 {@link #start(String)} 才开始，从而让客户端先确认「音乐已就绪」、
-     * 再阻塞等待服务端告知「从何处开始」，避免进度条基线（0.00m）不一致。</p>
+     * 准备播放指定歌曲：服务端预载歌曲首段缓冲，并定位到该曲（在队列中则移到该下标，
+     * 否则追加到队尾——<strong>绝不</strong>清空或替换现有队列）。返回 ready 快照。
      *
      * @param musicId 目标歌曲 ID
      * @param sessionId 会话 ID；为 {@code null} 时回退到起始会话（0 号）
@@ -197,7 +185,6 @@ public class PlaybackEngine {
         session.setCurrentIndex(idx);
         MusicFile song = getCurrentSong(sessionId);
         long dur = (song != null && song.getMetadata() != null) ? song.getMetadata().getDuration() : 0;
-        session.prepareForPlayback(musicId, dur); // 准备（预缓冲意义上的准备；不启动时钟）
         queueManager.persistQueue(sessionId);
         // 预载入歌曲开头一部分到内存，加速客户端一旦开始播放时的首段流式。
         // 预缓冲失败不影响后续播放，退化为普通流式。
@@ -209,36 +196,15 @@ public class PlaybackEngine {
         Map<String, Object> ready = new HashMap<>();
         ready.put("status", "ready");
         ready.put("songId", musicId);
-        ready.put("title", song != null && song.getMetadata() != null ? song.getMetadata().getTitle() : "");
-        ready.put("artist", song != null && song.getMetadata() != null ? song.getMetadata().getArtist() : "");
+        ready.put("title", song != null ? song.displayTitle() : "");
+        ready.put("artist", song != null ? song.displayArtist() : "");
         ready.put("album", song != null && song.getMetadata() != null ? song.getMetadata().getAlbum() : "");
         ready.put("duration", (int) Math.round(dur));
-        ready.put("isPreparing", true);
         return ready;
     }
 
-    /**
-     * 播放握手·阶段二：客户端在「音乐已就绪」后阻塞等待、问服务端「从何处开始」。
-     * 服务端此时才启动权威播放时钟，并返回起始偏移与服务端权威时间戳
-     * {@code serverTime}（epoch 毫秒）。客户端应以此时间戳作为进度条基线，
-     * 而非本地 {@code audio.play()} 触发的时刻，从而避免基线漂移。
-     *
-     * @param sessionId 会话 ID；为 {@code null} 时回退到起始会话（0 号）
-     * @return started 快照（含 {@code status="started"}、position 秒、serverTime 权威时间戳）；
-     *         若尚未调用 {@link #prepare} 则返回 {@code null}
-     */
-    public Map<String, Object> start(String sessionId) {
-        PlaybackSession session = sessions.playbackSession(sessionId);
-        long startOffsetMillis = session.beginAuthoritativeClock();
-        if (startOffsetMillis < 0) {
-            return null; // 尚未 prepare
-        }
-        // 阶段二即代表客户端已与服务端对齐，视为一次同步确认（避免 5 分钟对账误报）
-        session.markClientSynced();
-        return buildStartedSnapshot(sessionId, session, startOffsetMillis);
-    }
-
-    /** 暂停播放，固化当前进度。队列为空时返回 {@code null}（与 {@link #play} 对齐）。
+    /** 暂停播放。位置归客户端，服务端不持有时钟——此处仅返回当前歌曲元数据快照，不做状态改动。
+     * 队列为空时返回 {@code null}（与 {@link #play} 对齐）。
      * @param sessionId 会话 ID；为 {@code null} 时回退到起始会话（0 号） */
     public Map<String, Object> pause(String sessionId) {
         PlaybackSession session = sessions.playbackSession(sessionId);
@@ -246,17 +212,13 @@ public class PlaybackEngine {
         if (current == null) {
             return null;
         }
-        session.pausePlayback();
-        session.markClientSynced();
         return progressMapper.buildProgress(sessionId, session, current);
     }
 
     /**
      * 在现有播放队列中选播某首歌：若队列已包含该曲则直接定位，否则追加到队尾，
      * 不会替换或清空队列里的其它歌曲（修复「点曲库歌曲会把整个队列清空」的问题）。
-     * 返回值为两段式握手的结果快照（{@code status="started"}、含权威 {@code serverTime}）；
-     * 歌曲不存在时返回 {@code null}。Web 端也可改用显式的 {@link #prepare} + {@link #start}
-     * 两段式以获得「先就绪、再等待开始」的体验。
+     * 返回当前歌曲元数据快照；歌曲不存在时返回 {@code null}。
      *
      * @param sessionId 会话 ID；为 {@code null} 时回退到起始会话（0 号）
      */
@@ -269,23 +231,19 @@ public class PlaybackEngine {
         int idx = session.ensureSongPresent(id);
         session.setCurrentIndex(idx);
         MusicFile song = resolveCurrent(session);
-        long dur = (song != null && song.getMetadata() != null) ? song.getMetadata().getDuration() : 0;
-        // 原子：准备 + 启动权威时钟。之前这里拆成 prepare() + start() 两次独立调用，
-        // 并发两个 playSongById 时 A 的 start 可能启动 B 刚 prepare 的歌（会话级竞态）。
-        long startOffsetMillis = session.prepareAndStart(id, dur);
-        // 与 /start 对齐：一步到位即视为一次同步确认，避免 5 分钟对账误报
-        session.markClientSynced();
+        syncDuration(session, song); // 仅记录元数据时长
         queueManager.persistQueue(sessionId);
         try {
             preloadService.preload(id);
         } catch (Exception ignored) {
             // 预缓冲失败不影响后续播放，退化为普通流式
         }
-        return buildStartedSnapshot(sessionId, session, startOffsetMillis);
+        return progressMapper.buildProgress(sessionId, session, song);
     }
 
     /**
-     * 跳转到指定位置（秒）。
+     * 跳转到指定位置（秒）。位置归客户端，服务端不持有时钟——此处不修改任何服务端状态，
+     * 仅返回当前歌曲元数据快照。
      *
      * @param positionSeconds 目标位置（秒，向下取整为 0）
      * @param sessionId 会话 ID；为 {@code null} 时回退到起始会话（0 号）
@@ -296,30 +254,19 @@ public class PlaybackEngine {
         if (current == null) {
             return null;
         }
-        session.seekPlayback(Math.max(0, positionSeconds));
-        session.markClientSynced();
         return progressMapper.buildProgress(sessionId, session, current);
     }
 
     /**
-     * 组装「当前播放进度」快照，供前端进度条与「正在播放」展示使用。
+     * 组装「当前播放进度」快照，供前端展示。仅含歌曲元数据（不含实时位置），
+     * 因为位置归客户端（浏览器用 audio.currentTime）。
      *
      * @param sessionId 会话 ID；为 {@code null} 时回退到起始会话（0 号）
      */
     public Map<String, Object> getProgress(String sessionId) {
         PlaybackSession session = sessions.playbackSession(sessionId);
-        session.stopIfEnded(); // 歌曲已播完则自动停住，避免状态卡在 playing、守卫误报
-        // 纯拉取：不视为同步确认。确认必须由客户端显式 POST /sync/ack 完成（见 play 的握手约定）
         MusicFile current = getCurrentSong(sessionId);
-        // 空队列也统一走 buildProgress 组装，使 empty 快照与 ProgressMapper 内部形状一致
-        // （含 sessionId / lastSyncedAt / syncDueAt），前端无需为多种 empty 形状分别处理。
         return progressMapper.buildProgress(sessionId, session, current);
-    }
-
-    /** 显式确认客户端已与服务端同步播放进度（供 {@code sync.ack} 命令调用）。
-     * @param sessionId 会话 ID；为 {@code null} 时回退到起始会话（0 号） */
-    public void markClientSynced(String sessionId) {
-        sessions.playbackSession(sessionId).markClientSynced();
     }
 
     /** 从会话取当前歌曲 ID 并解析成曲库实体（队列为空或 ID 已失效时返回 {@code null}）。 */
@@ -328,23 +275,11 @@ public class PlaybackEngine {
         return id != null ? scannerService.getMusicById(id).orElse(null) : null;
     }
 
-    /** 组装两段式握手阶段二的 started 快照（含权威 {@code serverTime} 与起始偏移）。 */
-    private Map<String, Object> buildStartedSnapshot(String sessionId, PlaybackSession session,
-                                                     long startOffsetMillis) {
-        MusicFile current = resolveCurrent(session);
-        Map<String, Object> started = progressMapper.buildProgress(sessionId, session, current);
-        started.put("status", "started");
-        started.put("position", Math.round(startOffsetMillis / 100.0) / 100.0); // 起始偏移（秒）
-        started.put("serverTime", session.getSegmentStartEpoch()); // 权威时间戳：客户端进度条基线
-        started.put("isPlaying", true);
-        return started;
-    }
-
     /**
-     * 把歌曲元数据里的总时长同步进会话（秒 → 毫秒）。
+     * 把歌曲元数据里的总时长同步进会话（秒 → 毫秒），仅作元数据供展示。
      */
     private void syncDuration(PlaybackSession session, MusicFile song) {
-        int dur = song.getMetadata() != null ? song.getMetadata().getDuration() : 0;
+        int dur = song != null && song.getMetadata() != null ? song.getMetadata().getDuration() : 0;
         if (dur > 0) {
             session.setDurationSeconds(dur);
         }

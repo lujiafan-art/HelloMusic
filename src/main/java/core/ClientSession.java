@@ -25,7 +25,7 @@ package core;
  * <ul>
  *   <li>普通前端通过 {@code connect} 命令创建，拿到 {@code sessionId}；</li>
  *   <li>之后每 {@code heartbeatIntervalMs} 发送一次心跳（{@link #touch()}）以保持存活；</li>
- *   <li>服务端定时扫描：心跳超时先 {@code pause} 其播放，超过删除阈值则结束并移除该会话。</li>
+ *   <li>服务端定时扫描：心跳超时记为 stale（仅记录日志），超过删除阈值则结束并移除该会话。</li>
  * </ul>
  *
  * 起始会话（数字 ID {@code "0"}）在尚未被真实客户端占用前，作为「未带 {@code sessionId}」
@@ -38,10 +38,9 @@ public class ClientSession {
     private final String clientIp;     // 客户端自报的 IP（本机为 127.0.0.1，而非 localhost）
     private final String remoteAddr;   // 服务端从请求中观测到的真实对端地址
     private final long createEpoch;
-    // volatile：心跳线程（touch/markSyncWarned）与巡检线程（inspectSessions 读）分属不同线程，
-    // 无同步屏障的话巡检可能读到陈旧时间戳，把「刚心跳过」的会话误判为超时并暂停其播放。
+    // volatile：心跳线程（touch）与巡检线程（inspectSessions 读）分属不同线程，
+    // 无同步屏障的话巡检可能读到陈旧时间戳，把「刚心跳过」的会话误判为超时。
     private volatile long lastHeartbeatEpoch;
-    private volatile long lastSyncWarnEpoch; // 上次因客户端未同步而记录 WARN 的时间（用于节流）
     private volatile boolean connected;
 
     public ClientSession(String sessionId, String clientIp, String remoteAddr) {
@@ -77,15 +76,6 @@ public class ClientSession {
 
     public long getLastHeartbeatEpoch() {
         return lastHeartbeatEpoch;
-    }
-
-    public long getLastSyncWarnEpoch() {
-        return lastSyncWarnEpoch;
-    }
-
-    /** 记录「因客户端未同步而发出 WARN」的时刻，用于节流（距离上次警告不足阈值则不再重复刷日志）。 */
-    public void markSyncWarned(long now) {
-        this.lastSyncWarnEpoch = now;
     }
 
     public boolean isConnected() {

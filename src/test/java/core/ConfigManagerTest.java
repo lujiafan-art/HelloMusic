@@ -58,7 +58,6 @@ class ConfigManagerTest {
         // 用户选项（原 UserConfig 的 7 项迁入）
         config.setMaxQueueSize(500);
         config.setAutoSaveQueue(1);
-        config.setQueueSavePath("/data/queue");
         config.setMusicPaths(new ArrayList<>(List.of("~/Music", "/mnt/nas")));
         config.setEnableFileLog(1);
         config.setLogPath("/var/log/hellomusic");
@@ -131,7 +130,6 @@ class ConfigManagerTest {
         ConfigManager.Config patch = emptyPatch();
         patch.setMaxQueueSize(50);
         patch.setAutoSaveQueue(0);
-        patch.setQueueSavePath("/tmp/q");
         patch.setMusicPaths(new ArrayList<>(List.of("/srv/music")));
         patch.setEnableFileLog(0);
         patch.setLogPath("/tmp/logs");
@@ -142,7 +140,6 @@ class ConfigManagerTest {
 
         assertEquals(Integer.valueOf(50), merged.getMaxQueueSize());
         assertEquals(Integer.valueOf(0), merged.getAutoSaveQueue());
-        assertEquals("/tmp/q", merged.getQueueSavePath());
         assertEquals(List.of("/srv/music"), merged.getMusicPaths());
         assertEquals(Integer.valueOf(0), merged.getEnableFileLog());
         assertEquals("/tmp/logs", merged.getLogPath());

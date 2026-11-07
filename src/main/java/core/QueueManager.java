@@ -113,22 +113,32 @@ public class QueueManager {
         return true;
     }
 
+    /** 向播放队列追加一首歌的结果：已新增 / 已在队列（去重命中）/ 队列已满。 */
+    public enum AddResult {
+        ADDED,
+        ALREADY_PRESENT,
+        QUEUE_FULL
+    }
+
     /**
-     * 添加歌曲到队列。
+     * 添加歌曲到队列（去重 + 上限检查）。
      *
-     * @return {@code true} 表示本次确实加入；队列已达上限（或歌曲已在队列）时返回 {@code false}。
-     *         调用方据此准确计数，而不是把「尝试添加」误当作「已加入」。
+     * <p>「是否已在队列」「是否已达上限」与「追加」由 {@link PlaybackSession#addIfAbsent}
+     * 合成一次原子操作完成，避免并发下重复添加或突破上限。</p>
+     *
+     * @return {@link AddResult#ADDED} 本次确实加入；{@link AddResult#ALREADY_PRESENT}
+     *         该曲已在队列（去重跳过）；{@link AddResult#QUEUE_FULL} 队列已达上限。
      */
-    public boolean addToQueue(String musicId, String sessionId) {
+    public AddResult addToQueue(String musicId, String sessionId) {
         PlaybackSession session = sessions.playbackSession(sessionId);
         int max = configManager.getMaxQueueSize();
-        if (session.getSize() >= max) {
+        AddResult result = session.addIfAbsent(musicId, max);
+        if (result == AddResult.QUEUE_FULL) {
             log.warn("队列已达上限 " + max + " 首，忽略本次添加: " + musicId);
-            return false;
+        } else if (result == AddResult.ADDED) {
+            persistQueue(sessionId);
         }
-        session.addSong(musicId);
-        persistQueue(sessionId);
-        return true;
+        return result;
     }
 
     // 清空队列

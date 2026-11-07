@@ -22,58 +22,42 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 播放进度快照组装：把会话的播放状态与歌曲元数据拼成前端进度条 / 「正在播放」可用的 Map。
+ * 播放进度快照组装：把「当前歌曲元数据」拼成前端可用的 Map。
  *
  * <p>纯无状态映射（{@code PlaybackSession} + {@code MusicFile} → {@code Map}），从
  * {@link PlaybackService} 拆出，避免「组装 DTO」与「控制播放 / 管理队列」混在一起。</p>
+ *
+ * <p><b>位置归客户端。</b>服务端不持有时钟、不推算「现在播到第几秒」，因此本类只返回
+ * 歌曲元数据（songId / title / artist / album / duration）与播放模式，不返回任何实时
+ * 位置（position / percent / isPlaying / serverTime）。没有客户端上报通道，故 {@code status}
+ * 诚实地返回 {@code "unknown"}——表达「服务器不知道位置」。</p>
  */
 public class ProgressMapper {
 
     /**
-     * 把会话的播放状态与歌曲元数据拼成前端可用的进度快照。
+     * 把当前歌曲的元数据拼成前端可用的进度快照。
      *
-     * <p>{@code sessionId} 无条件写入，使「空队列」与「正常播放」两种快照都带同一会话标识，
-     * 前端不必为多种 empty 形状（此前 {@code PlaybackEngine.getProgress} 手工构造的 empty 与
-     * 本方法内部的 empty 形状不一致）分别解析。</p>
+     * <p>{@code sessionId} 无条件写入，使「空队列」与「有当前歌曲」两种快照都带同一会话标识，
+     * 前端不必为多种 empty 形状分别解析。</p>
      */
     public Map<String, Object> buildProgress(String sessionId, PlaybackSession session, MusicFile current) {
         Map<String, Object> progress = new HashMap<>();
         progress.put("sessionId", sessionId);
         if (current == null) {
             progress.put("status", "empty");
-            // 空队列也带上同步对账字段，与非空快照的形状保持一致
-            progress.put("lastSyncedAt", session.getLastClientSyncEpochMillis());
-            progress.put("syncDueAt", session.getLastClientSyncEpochMillis() + SessionRegistry.CLIENT_SYNC_INTERVAL_MS);
             return progress;
         }
 
-        long durationMillis = session.getDurationMillis();
-        long positionMillis = session.getPositionMillis();
-        double durationSeconds = durationMillis / 1000.0;
-        double positionSeconds = positionMillis / 1000.0;
-        boolean ended = durationMillis > 0 && positionMillis >= durationMillis;
-        // isPlaying 与 status 必须自洽：进度已到末尾时视为「已结束」，不再报告 playing。
-        // （buildProgress 本身不结算 stopIfEnded，故这里做一次「仅快照层面」的收敛，避免
-        //   返回 status="ended" 却 isPlaying=true 的矛盾状态。）
-        boolean isPlaying = session.isPlaying() && !ended;
-        String status = ended ? "ended" : (isPlaying ? "playing" : "paused");
-
         MusicMetadata meta = current.getMetadata();
-        progress.put("status", status);
+        progress.put("status", "unknown");
         progress.put("songId", current.getId());
-        progress.put("title", meta != null ? meta.getTitle() : current.getFileName());
-        progress.put("artist", meta != null ? meta.getArtist() : "");
+        // 显示名统一走 MusicFile.displayTitle()/displayArtist()：元数据优先、占位符
+        // 「Unknown Title/Artist」视为缺失、标题回退文件名（README 约定「显示名唯一实现」）。
+        progress.put("title", current.displayTitle());
+        progress.put("artist", current.displayArtist());
         progress.put("album", meta != null ? meta.getAlbum() : "");
-        progress.put("position", Math.round(positionSeconds * 10) / 10.0); // 保留 1 位小数
-        progress.put("duration", (int) Math.round(durationSeconds));
-        progress.put("isPlaying", isPlaying);
-        progress.put("percent", durationMillis > 0
-                ? Math.min(100.0, positionMillis * 100.0 / durationMillis)
-                : 0.0);
+        progress.put("duration", (int) Math.round(session.getDurationMillis() / 1000.0));
         progress.put("playMode", session.getPlayMode().getDisplayName());
-        // 同步对账信息：客户端应在此窗口内再来同步一次，否则服务端记日志
-        progress.put("lastSyncedAt", session.getLastClientSyncEpochMillis());
-        progress.put("syncDueAt", session.getLastClientSyncEpochMillis() + SessionRegistry.CLIENT_SYNC_INTERVAL_MS);
         return progress;
     }
 }

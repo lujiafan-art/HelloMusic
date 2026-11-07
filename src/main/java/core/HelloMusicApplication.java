@@ -36,7 +36,7 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>职责：读取配置 → 装文件日志 → 手动装配对象图 → 启动扫描与队列恢复 → 挂调度器
  * （广播 / 会话巡检 / 曲库重扫）→ 启动 Unix Socket 控制面（本机）与 HTTP 网关
- * （控制面 TCP 包装 + 数据面媒体）→ 注册关闭钩子。</p>
+ * （控制面 + 数据面媒体）→ 注册关闭钩子。</p>
  */
 public final class HelloMusicApplication {
 
@@ -95,7 +95,7 @@ public final class HelloMusicApplication {
         scheduler.scheduleWithFixedDelay(safe(scannerService::scanLibrary), rescanInterval,
                 rescanInterval, TimeUnit.MILLISECONDS);
 
-        // ===== 控制面（Unix Socket 本机 + HTTP/TCP 包装）+ 数据面（HTTP 媒体） =====
+        // ===== 控制面（Unix Socket 本机 + HTTP）+ 数据面（HTTP 媒体） =====
         CommandDispatcher dispatcher = new CommandDispatcher(playbackService, playlistService,
                 scannerService, broadcastService, configManager, mapper, validator, executor);
 

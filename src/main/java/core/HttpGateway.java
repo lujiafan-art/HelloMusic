@@ -43,7 +43,7 @@ import java.util.Map;
  *
  * <p>它同时承载两类内容，兑现「对外都是 HTTP」的约定：</p>
  * <ul>
- *   <li><b>控制面（TCP 包装）</b>：{@code POST /control} —— 把 JSON 请求体
+ *   <li><b>控制面</b>：{@code POST /control} —— 把 JSON 请求体
  *       {@code {"cmd": "...", ...参数}} 转发给 {@link CommandDispatcher}，其响应中的
  *       {@code status} 字段被映射为真实的 HTTP 状态码。这样本机客户端走零拷贝的 Unix Socket
  *       （见 {@link UnixSocketServer}），局域网 / 远程客户端则通过 HTTP 走同一条命令分发链路；</li>
@@ -108,7 +108,7 @@ public class HttpGateway {
         return server == null ? port : server.getAddress().getPort();
     }
 
-    // ===== 控制面（TCP 包装） =====
+    // ===== 控制面 =====
 
     private void handleControl(HttpExchange exchange) throws IOException {
         // 跨域：浏览器跨源调用控制面时会先发 OPTIONS 预检
@@ -139,7 +139,7 @@ public class HttpGateway {
             return;
         }
 
-        Map<String, Object> response = dispatcher.dispatch(request);
+        Map<String, Object> response = dispatcher.dispatch(request, remoteAddrOf(exchange));
         sendJson(exchange, httpStatusOf(response), response);
     }
 
@@ -299,6 +299,14 @@ public class HttpGateway {
     }
 
     // ===== 工具 =====
+
+    /** 从 HTTP 连接提取真实对端 IP，供会话 {@code connect} 记录 remoteAddr（观测值，非客户端自报）。 */
+    private static String remoteAddrOf(HttpExchange exchange) {
+        if (exchange.getRemoteAddress() == null || exchange.getRemoteAddress().getAddress() == null) {
+            return "unknown";
+        }
+        return exchange.getRemoteAddress().getAddress().getHostAddress();
+    }
 
     /** 从请求路径中提取 {@code /prefix/{id}} 的 {@code id} 段。 */
     private static String pathSegment(HttpExchange exchange, String prefix) {

@@ -40,12 +40,12 @@ import java.util.concurrent.ExecutorService;
  *
  * <p>命令清单与原 HTTP 端点一一对应（除音频流/封面/歌词三处二进制数据面由
  * {@link HttpGateway} 承担）。本类与传输层无关：既被本机 Unix Socket（{@link UnixSocketServer}）
- * 直接调用，也被 HTTP 网关的 {@code POST /control}（TCP 包装）调用。</p>
+ * 直接调用，也被 HTTP 网关的 {@code POST /control} 调用。</p>
  * <ul>
  *   <li>会话：{@code connect} / {@code heartbeat} / {@code disconnect} / {@code session.status}</li>
  *   <li>播放：{@code mode} / {@code mode.switch} / {@code mode.set} / {@code current} /
- *       {@code prepare} / {@code start} / {@code play} / {@code pause} / {@code seek} /
- *       {@code progress} / {@code sync.ack} / {@code next} / {@code previous}</li>
+ *       {@code prepare} / {@code play} / {@code pause} / {@code seek} /
+ *       {@code progress} / {@code next} / {@code previous}</li>
  *   <li>队列：{@code load.all} / {@code select} / {@code load} / {@code load.playlist} /
  *       {@code queue} / {@code queue.clear} / {@code queue.add} / {@code queue.add.batch}</li>
  *   <li>音乐库：{@code music} / {@code music.get} / {@code search} / {@code artist} / {@code artists}</li>
@@ -88,12 +88,25 @@ public class CommandDispatcher {
     }
 
     /**
-     * 分发一条命令，返回可序列化为 JSON 行的响应 Map。
+     * 分发一条命令（无传输层对端地址，等价于 {@link #dispatch(JsonNode, String)} 传 {@code null}）。
+     * 供测试与「不关心对端地址」的调用方使用。
      *
      * @param request 已解析的请求 JSON（含 {@code cmd} 字段）
      * @return 响应 Map（恒非 {@code null}）
      */
     public Map<String, Object> dispatch(JsonNode request) {
+        return dispatch(request, null);
+    }
+
+    /**
+     * 分发一条命令，返回可序列化为 JSON 行的响应 Map。
+     *
+     * @param request    已解析的请求 JSON（含 {@code cmd} 字段）
+     * @param remoteAddr 传输层观测到的真实对端地址（HTTP 为对端 IP，Unix Socket 为 {@code "local"}）；
+     *                   为 {@code null} 时由 {@link #connect} 兜底为 {@code "local"}
+     * @return 响应 Map（恒非 {@code null}）
+     */
+    public Map<String, Object> dispatch(JsonNode request, String remoteAddr) {
         String cmd = text(request, "cmd");
         if (cmd == null) {
             return error(400, "缺少 cmd 字段");
@@ -101,7 +114,7 @@ public class CommandDispatcher {
         try {
             Map<String, Object> data = switch (cmd) {
                 // ===== 会话 =====
-                case "connect" -> connect(request);
+                case "connect" -> connect(request, remoteAddr);
                 case "heartbeat" -> heartbeat(request);
                 case "disconnect" -> disconnect(request);
                 case "session.status" -> sessionStatus(request);
@@ -114,12 +127,10 @@ public class CommandDispatcher {
                 // ===== 播放控制 =====
                 case "current" -> current(request);
                 case "prepare" -> prepare(request);
-                case "start" -> start(request);
                 case "play" -> play(request);
                 case "pause" -> pause(request);
                 case "seek" -> seek(request);
                 case "progress" -> progress(request);
-                case "sync.ack" -> syncAck(request);
                 case "next" -> next(request);
                 case "previous" -> previous(request);
 
@@ -172,10 +183,12 @@ public class CommandDispatcher {
 
     // ===== 会话 =====
 
-    private Map<String, Object> connect(JsonNode req) {
+    private Map<String, Object> connect(JsonNode req, String remoteAddr) {
         String clientIp = text(req, "clientIp");
-        // Unix Socket 连接无对端地址语义，统一记为 "unix"
-        return ok(playbackService.connect(clientIp, "unix"));
+        // remoteAddr 由传输层观测后传入：HTTP 网关给真实对端 IP，Unix Socket 给 "local"
+        // （本机进程语义）。仅在传输层未能提供时兜底为 "local"。
+        String observed = remoteAddr != null && !remoteAddr.isBlank() ? remoteAddr : "local";
+        return ok(playbackService.connect(clientIp, observed));
     }
 
     private Map<String, Object> heartbeat(JsonNode req) {
@@ -246,14 +259,6 @@ public class CommandDispatcher {
         return ok(ready);
     }
 
-    private Map<String, Object> start(JsonNode req) {
-        Map<String, Object> started = playbackService.start(text(req, "sessionId"));
-        if (started == null) {
-            return error(409, "尚未准备（请先调用 prepare）");
-        }
-        return ok(started);
-    }
-
     private Map<String, Object> play(JsonNode req) {
         Integer duration = integer(req, "duration");
         Map<String, Object> progress = playbackService.play(duration, text(req, "sessionId"));
@@ -283,11 +288,6 @@ public class CommandDispatcher {
 
     private Map<String, Object> progress(JsonNode req) {
         return ok(playbackService.getProgress(text(req, "sessionId")));
-    }
-
-    private Map<String, Object> syncAck(JsonNode req) {
-        playbackService.markClientSynced(text(req, "sessionId"));
-        return ok(Map.of("status", "synced"));
     }
 
     private Map<String, Object> next(JsonNode req) {
@@ -367,10 +367,12 @@ public class CommandDispatcher {
         if (scannerService.getMusicById(musicId).isEmpty()) {
             return error(400, "歌曲不存在");
         }
-        if (!playbackService.addToQueue(musicId, text(req, "sessionId"))) {
-            return error(409, "队列已满");
-        }
-        return ok(Map.of("status", "added"));
+        QueueManager.AddResult result = playbackService.addToQueue(musicId, text(req, "sessionId"));
+        return switch (result) {
+            case ADDED -> ok(Map.of("status", "added"));
+            case ALREADY_PRESENT -> error(409, "歌曲已在队列");
+            case QUEUE_FULL -> error(409, "队列已满");
+        };
     }
 
     private Map<String, Object> addBatchToQueue(JsonNode req) {
@@ -378,14 +380,16 @@ public class CommandDispatcher {
         if (musicIds == null || musicIds.isEmpty()) {
             return error(400, "音乐列表不能为空");
         }
-        int added = 0, invalid = 0, dropped = 0;
+        int added = 0, invalid = 0, dropped = 0, duplicate = 0;
         for (String id : musicIds) {
             if (scannerService.getMusicById(id).isEmpty()) {
                 invalid++;
-            } else if (!playbackService.addToQueue(id, text(req, "sessionId"))) {
-                dropped++;
-            } else {
-                added++;
+                continue;
+            }
+            switch (playbackService.addToQueue(id, text(req, "sessionId"))) {
+                case ADDED -> added++;
+                case ALREADY_PRESENT -> duplicate++;
+                case QUEUE_FULL -> dropped++;
             }
         }
         Map<String, Object> body = new LinkedHashMap<>();
@@ -393,6 +397,9 @@ public class CommandDispatcher {
         body.put("count", added);
         if (invalid > 0) {
             body.put("invalid", invalid);
+        }
+        if (duplicate > 0) {
+            body.put("duplicate", duplicate);
         }
         if (dropped > 0) {
             body.put("dropped", dropped);

@@ -29,7 +29,7 @@ import java.util.Map;
  *
  * <ul>
  *   <li>{@link SessionRegistry}——会话生命周期（连接 / 心跳 / 断开 / 巡检）；</li>
- *   <li>{@link PlaybackEngine}——播放控制（play / pause / seek / next / previous / 两段式握手）；</li>
+ *   <li>{@link PlaybackEngine}——播放控制（play / pause / seek / next / previous）；</li>
  *   <li>{@link QueueManager}——队列加载 / 追加 / 清空 / 落盘；</li>
  *   <li>{@link ProgressMapper}——进度快照组装（被 {@link PlaybackEngine} 内部使用）。</li>
  * </ul>
@@ -107,10 +107,6 @@ public class PlaybackService {
         return playbackEngine.prepare(musicId, sessionId);
     }
 
-    public Map<String, Object> start(String sessionId) {
-        return playbackEngine.start(sessionId);
-    }
-
     public Map<String, Object> playSongById(String id, String sessionId) {
         return playbackEngine.playSongById(id, sessionId);
     }
@@ -127,10 +123,6 @@ public class PlaybackService {
         return playbackEngine.getProgress(sessionId);
     }
 
-    public void markClientSynced(String sessionId) {
-        playbackEngine.markClientSynced(sessionId);
-    }
-
     // ===== 队列管理（委托 QueueManager） =====
 
     public QueueManager.LoadResult loadPlaylist(List<String> musicIds, String sessionId) {
@@ -145,7 +137,7 @@ public class PlaybackService {
         return queueManager.loadPlaylistById(playlistId, sessionId);
     }
 
-    public boolean addToQueue(String musicId, String sessionId) {
+    public QueueManager.AddResult addToQueue(String musicId, String sessionId) {
         return queueManager.addToQueue(musicId, sessionId);
     }
 
