@@ -292,6 +292,19 @@ class ConfigManagerTest {
         assertTrue(validate(lowerCase).isEmpty(), "播放模式应忽略大小写");
     }
 
+    @Test
+    void rejectsNegativeCurrentIndex() {
+        ConfigManager.Config negative = emptyPatch();
+        negative.setCurrentIndex(-1);
+        assertTrue(violates(validate(negative), "currentIndex"), "播放位置下标不能为负");
+
+        // 上界依赖队列长度，无法用固定 @Max 静态表达：越界（大于队列长度）不在此处拦下，
+        // 由 PlaybackSession.setCurrentIndex 在运行时兜底（静默忽略，不会越界）。
+        ConfigManager.Config oversized = emptyPatch();
+        oversized.setCurrentIndex(99_999);
+        assertTrue(validate(oversized).isEmpty(), "上界无法静态表达，越界由 setCurrentIndex 兜底");
+    }
+
     // ========== 播放队列持久化字段 ==========
 
     @Test

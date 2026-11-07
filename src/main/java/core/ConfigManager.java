@@ -220,6 +220,7 @@ public class ConfigManager {
             case "supportedExtensions" -> config.supportedExtensions = null;
             case "serverName" -> config.serverName = null;
             case "lastPlayMode" -> config.lastPlayMode = null;
+            case "currentIndex" -> config.currentIndex = null;
             case "maxQueueSize" -> config.maxQueueSize = null;
             case "autoSaveQueue" -> config.autoSaveQueue = null;
             case "musicPaths" -> config.musicPaths = null;
@@ -538,7 +539,15 @@ public class ConfigManager {
         /** 持久化的播放队列（歌曲 ID 列表）；重启后恢复，避免每次都要重新载入。 */
         private List<String> playbackQueue;
 
-        /** 持久化的当前播放位置（队列下标）；与 {@link #playbackQueue} 一起在重启后恢复。 */
+        /**
+         * 持久化的当前播放位置（队列下标）；与 {@link #playbackQueue} 一起在重启后恢复。
+         *
+         * <p>只校验下界（下标不能为负）。上界依赖 {@link #playbackQueue} 的长度，无法用固定
+         * {@code @Max} 静态表达，故此处不设上限——越界值（大于队列长度）由
+         * {@link PlaybackSession#setCurrentIndex(int)} 兜底：它仅在「队列非空且
+         * {@code 0 <= index < size}」时生效，越界被静默忽略，不会导致运行时越界。</p>
+         */
+        @Min(value = 0, message = "播放位置下标不能为负数")
         private Integer currentIndex;  // 用包装类型：null 表示「未显式保存」，mergeInto 时保留旧值
 
         // ===== 用户选项（原 UserConfig 的 7 项迁入，均为「对 null 宽容」的约束） =====
