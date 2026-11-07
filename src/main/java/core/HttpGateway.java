@@ -208,13 +208,14 @@ public class HttpGateway {
             return;
         }
 
-        // 多段合并为覆盖全部请求段的单一连续区间（避免多段各 100MB 整体读入内存导致 OOM）
+        // 多段 Range 只返回第一段，其余段忽略。
+        // 目标客户端（浏览器 <audio>）只会发单段 Range，多段请求实际不会出现；但为遵守
+        // RFC 7233，这里不把多段折叠成覆盖全部请求段的连续区间——那会返回客户端并未请求的
+        // 中间字节，并让 Content-Range 谎报一个连续区间（协议违规，客户端按多段语义解析会出错）。
+        // 真正支持多段需 multipart/byteranges 边界编码，因目标客户端不发多段，暂不实现，
+        // 按 RFC 7233 允许的降级策略退化为「只返回第一段」，并在下方 Content-Range 里如实体现。
         long start = ranges.get(0)[0];
         long end = ranges.get(0)[1];
-        for (long[] r : ranges) {
-            if (r[0] < start) start = r[0];
-            if (r[1] > end) end = r[1];
-        }
         long contentLength = end - start + 1;
 
         // 预缓冲加速：从 0 开始、且落在已预载首段内的请求，直接从内存返回

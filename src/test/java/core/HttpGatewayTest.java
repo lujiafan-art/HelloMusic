@@ -27,7 +27,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -120,6 +124,46 @@ class HttpGatewayTest {
         assertEquals(413, resp.statusCode(), "超过上限的请求体应返回 413，而非被整体读入内存");
         JsonNode body = mapper.readTree(resp.body());
         assertFalse(body.get("ok").asBoolean());
+    }
+
+    @Test
+    void multiRangeRequestReturnsOnlyFirstRange() throws Exception {
+        // 多段 Range 请求应退化为「只返回第一段」，而非折叠成覆盖区间：折叠会返回客户端
+        // 并未请求的中间字节，并让 Content-Range 谎报连续区间，违反 RFC 7233。此测试守护该约定。
+        byte[] content = new byte[200_000];
+        for (int i = 0; i < content.length; i++) {
+            content[i] = (byte) i;
+        }
+        Path tmp = Files.createTempFile("hellomusic-range", ".mp3");
+        Files.write(tmp, content);
+        tmp.toFile().deleteOnExit();
+
+        MusicFile musicFile = new MusicFile("A", "test.mp3", tmp.toString(), content.length,
+                "mp3", LocalDateTime.now());
+        MusicScannerService scanner = mock(MusicScannerService.class);
+        when(scanner.getMusicById("A")).thenReturn(Optional.of(musicFile));
+        PreloadService preload = mock(PreloadService.class); // getPreloaded 返回 null → 走流式路径
+
+        gateway = new HttpGateway(0, scanner, preload, null, mapper);
+        gateway.start();
+
+        HttpClient client = HttpClient.newHttpClient();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + gateway.getPort() + "/stream/A"))
+                .header("Range", "bytes=0-99,100000-100099")
+                .GET()
+                .build();
+        HttpResponse<byte[]> resp = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
+
+        assertEquals(206, resp.statusCode());
+        assertEquals("bytes 0-99/" + content.length,
+                resp.headers().firstValue("Content-Range").orElse(null),
+                "多段请求应只返回第一段，Content-Range 只描述第一段");
+        assertEquals(100, resp.body().length,
+                "响应体应只含第一段 100 字节，而非折叠成覆盖区间的 100100 字节");
+        for (int i = 0; i < 100; i++) {
+            assertEquals((byte) i, resp.body()[i], "第一段字节内容应正确（0..99）");
+        }
     }
 
     /** 启动一个网关（端口 0，媒体协作者置空），返回已绑定端口的网关。 */

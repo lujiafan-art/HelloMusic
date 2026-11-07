@@ -453,7 +453,7 @@ $BASE --data '{"cmd":"next"}'
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
 | `/control` | `POST` | 控制面 HTTP 入口（**默认无鉴权**）：请求体为命令 JSON（见[控制面命令](#控制面命令)），响应体同命令协议，HTTP 状态码镜像 `status` 字段 |
-| `/stream/{id}` | `GET` | 流式播放，支持 `Range`（`206 Partial Content`）；不支持的范围 → 416；歌曲或文件不存在 → 404 |
+| `/stream/{id}` | `GET` | 流式播放，支持单段 `Range`（`206 Partial Content`）；多段 Range 按 RFC 7233 降级为只返回第一段（不实现 `multipart/byteranges`）；不支持的范围 → 416；歌曲或文件不存在 → 404 |
 | `/cover/{id}` | `GET` | 歌曲封面图（内嵌封面优先，回退同目录同名 `jpg/jpeg/png`）；无封面 → 404 |
 | `/lyrics/{id}` | `GET` | 歌曲歌词纯文本（内嵌 USLT 优先，回退同目录同名 `.lrc`）；无歌词 → 404 |
 
