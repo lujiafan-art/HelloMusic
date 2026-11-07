@@ -109,6 +109,19 @@ class HttpGatewayTest {
         assertEquals(405, resp.statusCode());
     }
 
+    @Test
+    void controlEndpointRejectsOversizedBody() throws Exception {
+        CommandDispatcher dispatcher = mock(CommandDispatcher.class);
+
+        String big = "{\"cmd\":\"x\",\"pad\":\"" + "a".repeat(HttpGateway.MAX_CONTROL_BODY_BYTES) + "\"}";
+
+        HttpResponse<String> resp = postTo(gatewayAt(dispatcher), big);
+
+        assertEquals(413, resp.statusCode(), "超过上限的请求体应返回 413，而非被整体读入内存");
+        JsonNode body = mapper.readTree(resp.body());
+        assertFalse(body.get("ok").asBoolean());
+    }
+
     /** 启动一个网关（端口 0，媒体协作者置空），返回已绑定端口的网关。 */
     private HttpGateway gatewayAt(CommandDispatcher dispatcher) throws Exception {
         gateway = new HttpGateway(0, null, null, dispatcher, mapper);

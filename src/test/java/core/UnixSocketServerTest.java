@@ -21,7 +21,12 @@ package core;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -86,6 +91,47 @@ class UnixSocketServerTest {
             t2.join(2000);
         }
         assertFalse(Files.exists(sock), "最终停止后 socket 文件应被清理");
+    }
+
+    /** 超过行长上限的请求应被服务端断开连接，而非被无上限读入内存。 */
+    @Test
+    void rejectsOverlongRequestLine() throws Exception {
+        Path sock = tempDir.resolve("long.sock");
+        UnixSocketServer server = new UnixSocketServer(sock, null, Json.newMapper());
+        Thread t = new Thread(server::start, "sock-test-long");
+        t.start();
+        try {
+            awaitBound(server, sock, 5000);
+
+            try (SocketChannel client = SocketChannel.open(StandardProtocolFamily.UNIX)) {
+                client.connect(UnixDomainSocketAddress.of(sock));
+
+                // 写一行远超上限、不含换行的数据：服务端应在读满上限时抛 LineTooLongException 并断开
+                ByteBuffer buf = ByteBuffer.allocate(UnixSocketServer.MAX_LINE_BYTES + 1024);
+                while (buf.hasRemaining()) {
+                    buf.put((byte) 'x');
+                }
+                buf.flip();
+                try {
+                    client.write(buf);
+                } catch (IOException expected) {
+                    // 服务端可能已在上限处断开，写失败本身即证明被拒
+                }
+
+                // 读：期望读到 EOF（-1）或抛异常（服务端断开），而非正常响应
+                boolean disconnected;
+                ByteBuffer resp = ByteBuffer.allocate(256);
+                try {
+                    disconnected = client.read(resp) <= 0;
+                } catch (IOException e) {
+                    disconnected = true;
+                }
+                assertTrue(disconnected, "超长行应让服务端断开连接，而非返回响应");
+            }
+        } finally {
+            server.stop();
+            t.join(2000);
+        }
     }
 
     /** 等待服务完成 bind（socket 文件已创建且 serverChannel 已赋值）。 */

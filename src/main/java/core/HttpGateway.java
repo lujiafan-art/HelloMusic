@@ -37,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadPoolExecutor;
 
 /**
  * 统一 HTTP 网关：对外唯一的一扇 HTTP 门（JDK 内置 {@code com.sun.net.httpserver}，零额外依赖）。
@@ -59,6 +60,9 @@ import java.util.Map;
 public class HttpGateway {
 
     private static final Logger log = LoggerFactory.getLogger(HttpGateway.class);
+
+    /** 控制面请求体大小上限（256KB）。命令都是短 JSON，256KB 已远超实际需求；超限返回 413，防止恶意大 body 撑爆内存。 */
+    static final int MAX_CONTROL_BODY_BYTES = 256 * 1024;
 
     private final int port;
     private final MusicScannerService scannerService;
@@ -86,11 +90,8 @@ public class HttpGateway {
         server.createContext("/stream", this::handleStream);
         server.createContext("/cover", this::handleCover);
         server.createContext("/lyrics", this::handleLyrics);
-        server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "hellomusic-http");
-            t.setDaemon(true);
-            return t;
-        }));
+        server.setExecutor(ThreadPools.bounded("hellomusic-http", 16, 200,
+                new ThreadPoolExecutor.AbortPolicy()));
         server.start();
         log.info("HTTP 网关已监听: http://localhost:" + getPort()
                 + "（控制 POST /control，媒体 /stream /cover /lyrics）");
@@ -129,7 +130,12 @@ public class HttpGateway {
 
         JsonNode request;
         try {
-            request = objectMapper.readTree(exchange.getRequestBody().readAllBytes());
+            byte[] body = exchange.getRequestBody().readNBytes(MAX_CONTROL_BODY_BYTES + 1);
+            if (body.length > MAX_CONTROL_BODY_BYTES) {
+                sendJson(exchange, 413, Map.of("ok", false, "error", "请求体过大", "status", 413));
+                return;
+            }
+            request = objectMapper.readTree(body);
         } catch (IOException e) {
             sendJson(exchange, 400, Map.of("ok", false, "error", "请求不是合法 JSON", "status", 400));
             return;

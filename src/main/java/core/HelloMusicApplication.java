@@ -29,6 +29,7 @@ import java.time.LocalDateTime;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -64,11 +65,8 @@ public final class HelloMusicApplication {
         ProgressMapper progressMapper = new ProgressMapper();
 
         // 预载与扫描共用一个后台线程池（异步短任务）
-        ExecutorService executor = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "hellomusic-worker");
-            t.setDaemon(true);
-            return t;
-        });
+        ExecutorService executor = ThreadPools.bounded("hellomusic-worker", 8, 200,
+                new ThreadPoolExecutor.CallerRunsPolicy());
         PreloadService preloadService = new PreloadService(scannerService, executor);
         PlaybackEngine playbackEngine = new PlaybackEngine(sessionRegistry, scannerService,
                 configManager, queueManager, progressMapper, preloadService);

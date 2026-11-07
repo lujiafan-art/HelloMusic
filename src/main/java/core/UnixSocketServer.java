@@ -38,7 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -59,16 +59,16 @@ public class UnixSocketServer {
 
     private static final Logger log = LoggerFactory.getLogger(UnixSocketServer.class);
 
+    /** 单行请求的字节数上限（64KB）。命令都是短 JSON，超限即拒绝并断开，防止恶意客户端发无限长行撑爆内存。 */
+    static final int MAX_LINE_BYTES = 64 * 1024;
+
     private final Path socketPath;
     private final CommandDispatcher dispatcher;
     private final ObjectMapper objectMapper;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ExecutorService connectionPool =
-            Executors.newCachedThreadPool(r -> {
-                Thread t = new Thread(r, "hellomusic-socket-conn");
-                t.setDaemon(true);
-                return t;
-            });
+            ThreadPools.bounded("hellomusic-socket-conn", 8, 100,
+                    new ThreadPoolExecutor.AbortPolicy());
 
     private volatile ServerSocketChannel serverChannel;
 
@@ -143,7 +143,7 @@ public class UnixSocketServer {
                     Channels.newOutputStream(channel), StandardCharsets.UTF_8));
 
             String line;
-            while ((line = reader.readLine()) != null) {
+            while ((line = readLineBounded(reader)) != null) {
                 if (line.isBlank()) {
                     continue;
                 }
@@ -152,9 +152,46 @@ public class UnixSocketServer {
                 writer.write('\n');
                 writer.flush();
             }
+        } catch (LineTooLongException e) {
+            // 行超过上限：拒绝并断开连接，防止内存被无限长行撑爆
+            log.warn("拒绝超长请求行并断开连接: " + e.getMessage());
         } catch (IOException e) {
             // 客户端断开或读写失败：结束该连接即可，不影响服务
             log.debug("连接结束: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 读取一行请求（以 {@code \n} 结尾，兼容 {@code \r\n}）。
+     * 行长超过 {@link #MAX_LINE_BYTES} 时抛 {@link LineTooLongException}，
+     * 防止恶意客户端发无限长行把内存撑爆（原 {@code readLine()} 无上限）。
+     *
+     * @return 行内容（不含行结束符）；流已结束且无内容时返回 {@code null}
+     */
+    private String readLineBounded(BufferedReader reader) throws IOException {
+        StringBuilder sb = new StringBuilder(128);
+        while (true) {
+            int c = reader.read();
+            if (c == -1) {
+                return sb.length() == 0 ? null : sb.toString();
+            }
+            if (c == '\n') {
+                return sb.toString();
+            }
+            if (c == '\r') {
+                return sb.toString(); // 兼容 \r\n：紧跟的 \n 会在下一轮被当作空行跳过
+            }
+            if (sb.length() >= MAX_LINE_BYTES) {
+                throw new LineTooLongException();
+            }
+            sb.append((char) c);
+        }
+    }
+
+    /** 请求行超过 {@link #MAX_LINE_BYTES} 时抛出，用于在连接层拒绝恶意超长行。 */
+    private static final class LineTooLongException extends IOException {
+        LineTooLongException() {
+            super("请求行超过 " + MAX_LINE_BYTES + " 字节上限");
         }
     }
 
