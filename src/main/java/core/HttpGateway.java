@@ -37,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
@@ -70,6 +71,10 @@ public class HttpGateway {
     private final CommandDispatcher dispatcher;
     private final ObjectMapper objectMapper;
     private HttpServer server;
+    /** 处理 HTTP 交换的有界线程池；与网关同生命周期，{@link #stop()} 时关闭（线程均为守护线程）。 */
+    private final ExecutorService executor =
+            ThreadPools.bounded("hellomusic-http", 16, 200,
+                    new ThreadPoolExecutor.AbortPolicy());
 
     public HttpGateway(int port,
                        MusicScannerService scannerService,
@@ -90,18 +95,18 @@ public class HttpGateway {
         server.createContext("/stream", this::handleStream);
         server.createContext("/cover", this::handleCover);
         server.createContext("/lyrics", this::handleLyrics);
-        server.setExecutor(ThreadPools.bounded("hellomusic-http", 16, 200,
-                new ThreadPoolExecutor.AbortPolicy()));
+        server.setExecutor(executor);
         server.start();
         log.info("HTTP 网关已监听: http://localhost:" + getPort()
                 + "（控制 POST /control，媒体 /stream /cover /lyrics）");
     }
 
-    /** 停止 HTTP 网关。 */
+    /** 停止 HTTP 网关，并关闭其处理线程池。 */
     public void stop() {
         if (server != null) {
             server.stop(0);
         }
+        executor.shutdown();
     }
 
     /** 实际绑定的端口（端口传 0 时由系统分配，供测试读取）。 */
