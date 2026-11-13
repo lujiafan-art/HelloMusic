@@ -7,12 +7,12 @@
 
 > 本项目由 AI 辅助生成 —— 基于深度求索（DeepSeek）AI 模型，通过自然语言对话完成完整项目开发。
 
-扫描本机的音乐目录，提取标签与时长，在局域网里用 UDP 广播自我通告。**完全脱离 Spring**，纯 JDK 21 实现：**对外统一走 HTTP**，控制面同时提供两条**对等**通道 ——
+扫描本机的音乐目录，提取标签与时长，在局域网里用 UDP 广播自我通告。**完全脱离 Spring**，纯 JDK 21 实现：**对外统一走 HTTP**，控制面以 **Unix Socket 为唯一实现**，HTTP 只是它的「外壳」——
 
-- **控制面 · 双通道（对等）**：本机客户端通过 Unix domain socket 走 **JSON 行协议**（每请求一行 JSON、每响应一行 JSON），零 TCP/IP 协议栈、内核零拷贝、不占端口；局域网 / 远程客户端通过 **HTTP `POST /control`** 走**同一条命令分发链路**，命令集与权限完全一致、且**默认无鉴权**；
+- **控制面 · Unix Socket（唯一实现）+ HTTP 外壳**：控制面逻辑的唯一入口是 `CommandDispatcher`，且它**只被本机 Unix domain socket 服务器**调用（JSON 行协议：每请求一行 JSON、每响应一行 JSON，零 TCP/IP 协议栈、内核零拷贝、不占端口）；局域网 / 远程客户端通过 **HTTP `POST /control`** 访问，但 HTTP 只是把命令转发给 Unix Socket 的**外壳**，不是独立的控制路径，命令集与权限完全一致、且**默认无鉴权**；
 - **数据面 · HTTP**：浏览器 `<audio>` 与局域网播放器通过 JDK 内置 `com.sun.net.httpserver` 拉取**音频流 / 封面 / 歌词**三个只读媒体端点（支持 HTTP Range 拖动）。
 
-控制面与数据面共用一个 HTTP 门（`com.sun.net.httpserver`），因此**对外就是一组 HTTP 端点**：`POST /control` + `GET /stream /cover /lyrics`。没有数据库、没有前端构建、没有外部服务依赖，`java -jar` 一条命令就能跑起来。⚠️ 注意：`POST /control` 网络可达且无鉴权，任何能访问该端口的客户端都能执行全部控制命令（详见[安全提示](#安全提示)）。
+控制面与数据面共用一个 HTTP 门（`com.sun.net.httpserver`），因此**对外就是一组 HTTP 端点**：`POST /control` + `GET /stream /cover /lyrics`。没有数据库、没有前端构建、没有外部服务依赖，`java -jar` 一条命令就能跑起来。⚠️ 注意：`POST /control` 网络可达且**默认无鉴权**（可配置 `controlToken` 启用令牌鉴权），未配置时任何能访问该端口的客户端都能执行全部控制命令（详见[安全提示](#安全提示)）。
 
 ---
 
@@ -43,11 +43,12 @@
 ## 架构总览
 
 ```
-  本机客户端 ──Unix Socket──▶┐   ┌─────────────────────────────────┐
-  (JSON 行协议，仅本机)        ├─▶│  控制面（CommandDispatcher 路由）  │──▶ 播放/会话/队列/歌单/扫描/配置
-                             │   │  · UnixSocketServer（本机）        │
-  局域网/远程 ──HTTP──▶       │   │  · HttpGateway /control（无鉴权）  │
-  (POST /control，无鉴权) ─────┘   └─────────────────────────────────┘
+  本机客户端 ──Unix Socket──▶┐   ┌───────────────────────────────┐
+  (JSON 行协议，仅本机)        ├─▶│  控制面（唯一实现）             │
+                             │   │  UnixSocketServer              │──▶ CommandDispatcher
+  局域网/远程 ──HTTP──▶       │   │   （唯一调用 CommandDispatcher）│      ──▶ 播放/会话/队列/
+  (POST /control，无鉴权)      │   └───────────────▲───────────────┘      歌单/扫描/配置
+      └─ HttpGateway 外壳 ──转发──▶ UnixSocketClient（连本机 socket）
 
   浏览器 <audio> ──HTTP──▶  ┌──────────────────────────────┐
   (Range 拖动) ───────────▶ │  HttpGateway 数据面           │──▶ 音频字节 / 封面图 / 歌词文本
@@ -57,10 +58,10 @@
                                UDP 广播（255.255.255.255 + 子网）
 ```
 
-- **控制面**与**数据面**完全解耦：业务状态（会话、队列、播放、歌单、配置）只能通过 `CommandDispatcher` 修改；它同时被 Unix Socket（本机，JSON 行协议）与 HTTP `POST /control`（网络可达）两条**对等**传输层调用——HTTP 不是 Unix Socket 的「兼容包装」，而是能执行全部命令的完整控制入口。
-- ⚠️ **风险提示**：HTTP `POST /control` 默认监听所有网卡、**无任何鉴权**，任何能访问该端口的客户端都能改配置、清队列、删歌单；Unix Socket 则仅限本机进程（由 socket 文件权限控制）。两者权限不对等，详见[安全提示](#安全提示)。
+- **控制面**与**数据面**完全解耦：业务状态（会话、队列、播放、歌单、配置）只能通过 `CommandDispatcher` 修改，而它的唯一消费者是 `UnixSocketServer`。HTTP `POST /control` **不直接调用** `CommandDispatcher`——它是 Unix Socket 的「外壳」，把命令经 `UnixSocketClient` 转发给本机 socket 处理。因此无论客户端走哪条传输层，控制逻辑都汇聚到同一条路径。
+- ⚠️ **风险提示**：HTTP `POST /control` 默认监听所有网卡、**默认无鉴权**（可配置 `controlToken` 启用令牌鉴权），未配置时任何能访问该端口的客户端都能改配置、清队列、删歌单；Unix Socket 则仅限本机进程（由 socket 文件权限控制）。两者权限不对等，详见[安全提示](#安全提示)。
 - 音频流、封面、歌词是「数据」，不涉及业务状态，因此留在 HTTP 数据面供浏览器直接消费。
-- 两条控制通道与数据面共享同一套会话、队列与播放状态（同一个进程内的对象图）。
+- 两条传输通道与数据面共享同一套会话、队列与播放状态（同一个进程内的对象图）。
 
 ---
 
@@ -78,7 +79,7 @@
 | 流式播放 | `/stream/{id}` 支持 HTTP Range，可拖动进度条，返回 `206 Partial Content` |
 | 网络广播 | UDP 广播自我通告，同时发往 `255.255.255.255` 与本机子网广播地址 |
 | 控制面命令 | 会话、播放、队列、音乐库、歌单、系统六组命令；本机走 Unix Socket 行协议、远程走 HTTP `POST /control` |
-| Unix Socket + HTTP | 控制面双通道：本机经 Unix domain socket 走 JSON 行协议（零网络协议栈、不占端口），局域网/远程经 HTTP `POST /control` 访问同一条命令分发链路（**默认无鉴权**） |
+| Unix Socket + HTTP | 控制面唯一实现是 Unix Socket（JSON 行协议，零网络协议栈、不占端口）；HTTP `POST /control` 只是把命令转发给它的「外壳」，非独立控制路径（**默认无鉴权**） |
 | 播放列表 | 创建/改名/删除歌单，增删歌曲、批量添加、重排序，持久化到 `playlists.json` |
 | 封面与歌词 | 按歌曲返回内嵌封面图（`/cover/{id}`，回退同目录同名图片）与歌词文本（`/lyrics/{id}`，回退同目录 `.lrc`） |
 | 播放控制 | 正向、逆向、单曲循环、随机四种模式，可切换并自动持久化 |
@@ -143,7 +144,7 @@ java -jar target/HelloMusic.jar
 
 ### 客户端连接控制面
 
-控制面有两条对等通道，命令协议完全一致（见[控制面命令](#控制面命令)）：
+控制面唯一实现是 Unix Socket，HTTP 只是它的外壳；两条通道的命令协议完全一致（见[控制面命令](#控制面命令)）：
 
 **远程 / 局域网（HTTP `POST /control`）** —— 用 `curl` 发普通 HTTP 请求即可（默认无鉴权）：
 
@@ -194,6 +195,7 @@ print(s.recv(4096).decode())
   "logPath" : "~/.local/share/HelloMusic/logs",
   "enableHeartbeat" : 1,
   "unixSocketPath" : "~/.local/share/HelloMusic/hellomusic.sock",
+  "controlToken" : "",
   "lastPlayMode" : "FORWARD",
   "playbackQueue" : [ "9f0c2c6e-...", "1a2b3c4d-..." ],
   "currentIndex" : 0
@@ -216,6 +218,7 @@ print(s.recv(4096).decode())
 | `logPath` | String | `~/.local/share/HelloMusic/logs` | **需重启** | 日志目录，文件名格式 `日期-启动时间.txt` |
 | `enableHeartbeat` | 0/1 | `1` | **需重启** | 是否启用心跳包（见下方说明） |
 | `unixSocketPath` | String | `~/.local/share/HelloMusic/hellomusic.sock` | **需重启** | Unix Socket 文件路径，本机客户端通过它连接控制面 |
+| `controlToken` | String | 空（不启用） | **需重启** | HTTP 控制面访问令牌（共享密钥）；为空则**不启用鉴权**（向后兼容），配置后客户端须带 `Authorization: Bearer <token>`，否则返回 `401` |
 | `lastPlayMode` | String | `"FORWARD"` | — | 上次播放模式，**由程序自动写回**，不建议手改 |
 | `playbackQueue` | String[] | `[]` | 切歌 / 加载时 | 播放队列（歌曲 ID 列表），**由程序自动写回**，不建议手改 |
 | `currentIndex` | int | `0` | 切歌 / 加载时 | 当前播放位置（队列下标），**由程序自动写回**，不建议手改 |
@@ -277,7 +280,7 @@ curl -X POST -H 'Content-Type: application/json' \
 
 控制面命令是**一个 JSON 对象**（必含 `"cmd"` 字段，其余字段为该命令参数），有两条等价通道：
 
-- **HTTP**：`POST /control`，请求体与响应体就是该 JSON 对象，失败时 HTTP 状态码与 JSON 里的 `status` 字段一致；
+- **HTTP**：`POST /control`，请求体与响应体就是该 JSON 对象，失败时 HTTP 状态码与 JSON 里的 `status` 字段一致；配置了 `controlToken` 时须带 `Authorization: Bearer <token>` 头，否则返回 `401`；
 - **Unix Socket（本机）**：JSON 行协议 —— 每请求一行 JSON（以 `\n` 结尾），每响应一行 JSON。
 
 **请求**：
@@ -297,7 +300,7 @@ curl -X POST -H 'Content-Type: application/json' \
 
 | 项目 | 说明 |
 | --- | --- |
-| HTTP 通道 | `POST http://<host>:8080/control`，`Content-Type: application/json` |
+| HTTP 通道 | `POST http://<host>:8080/control`，`Content-Type: application/json`；配置了 `controlToken` 时加 `Authorization: Bearer <token>` |
 | Unix Socket 通道 | `nc -U <socketPath>`（或 `socat - UNIX-CONNECT:<socketPath>`），每行一个 JSON 对象 |
 | 编码 | UTF-8 |
 
@@ -452,7 +455,7 @@ $BASE --data '{"cmd":"next"}'
 
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
-| `/control` | `POST` | 控制面 HTTP 入口（**默认无鉴权**）：请求体为命令 JSON（见[控制面命令](#控制面命令)），响应体同命令协议，HTTP 状态码镜像 `status` 字段 |
+| `/control` | `POST` | 控制面 HTTP 入口（**默认无鉴权**，可配置 `controlToken` 启用令牌鉴权）：请求体为命令 JSON（见[控制面命令](#控制面命令)），响应体同命令协议，HTTP 状态码镜像 `status` 字段；鉴权失败 → 401 |
 | `/stream/{id}` | `GET` | 流式播放，支持单段 `Range`（`206 Partial Content`）；多段 Range 按 RFC 7233 降级为只返回第一段（不实现 `multipart/byteranges`）；不支持的范围 → 416；歌曲或文件不存在 → 404 |
 | `/cover/{id}` | `GET` | 歌曲封面图（内嵌封面优先，回退同目录同名 `jpg/jpeg/png`）；无封面 → 404 |
 | `/lyrics/{id}` | `GET` | 歌曲歌词纯文本（内嵌 USLT 优先，回退同目录同名 `.lrc`）；无歌词 → 404 |
@@ -563,9 +566,10 @@ HelloMusic/
 │   ├── MusicMetadata.java           # 标签模型
 │   ├── BroadcastService.java        # UDP 广播
 │   ├── LoggingInstaller.java        # 按配置为 logback 挂载文件 appender（启动前安装）
-│   ├── CommandDispatcher.java       # 控制面命令路由：唯一入口，与传输层无关
-│   ├── UnixSocketServer.java        # 控制面·本机通道：Unix Socket + JSON 行协议
-│   ├── HttpGateway.java             # 统一 HTTP 门：控制面 POST /control + 数据面 /stream /cover /lyrics（支持 Range）
+│   ├── CommandDispatcher.java       # 控制面命令路由：唯一入口，仅被 UnixSocketServer 调用
+│   ├── UnixSocketServer.java        # 控制面唯一实现：Unix Socket + JSON 行协议
+│   ├── UnixSocketClient.java        # 控制面客户端：HTTP 外壳用它把命令转发给本机 Unix Socket
+│   ├── HttpGateway.java             # 统一 HTTP 门：控制面 POST /control（外壳，转发给 Unix Socket）+ 数据面 /stream /cover /lyrics（支持 Range）
 │   ├── PreloadService.java          # 歌曲首段预缓冲（流缓存）：prepare 预载、stream 命中共享 LRU
 │   ├── Playlist.java                # 歌单模型
 │   ├── PlaylistService.java         # 歌单服务（含 JSON 持久化）
@@ -620,9 +624,9 @@ HelloMusic/
 
 这几条是重构后定下的分层与日志规范，新增代码请遵循：
 
-**控制面 / 数据面分离**：业务状态（会话、队列、播放、歌单、配置）只能通过 `CommandDispatcher` 的命令入口修改；数据面 `HttpGateway` 的媒体端点（流 / 封面 / 歌词）是**只读媒体服务**，绝不写业务状态。`CommandDispatcher` 与传输层无关——本机走 Unix Socket（JSON 行协议），远程走 HTTP `POST /control`，两条通道共享同一份对象图。
+**控制面 / 数据面分离**：业务状态（会话、队列、播放、歌单、配置）只能通过 `CommandDispatcher` 的命令入口修改；数据面 `HttpGateway` 的媒体端点（流 / 封面 / 歌词）是**只读媒体服务**，绝不写业务状态。`CommandDispatcher` 的唯一消费者是 `UnixSocketServer`（本机 JSON 行协议）；远程 HTTP `POST /control` 是 Unix Socket 的「外壳」——它不直接调用 `CommandDispatcher`，而是经 `UnixSocketClient` 把命令转发给本机 socket。两条传输通道共享同一份对象图。
 
-**分层依赖方向**：`CommandDispatcher → Service → 无`。Service 之间可以互相依赖，但**不得反向依赖命令分发或数据面**——预缓冲逻辑因此独立为 `PreloadService`，控制面（`prepare` 预载）与数据面（`stream` 命中）共享同一单例缓存。
+**分层依赖方向**：`CommandDispatcher → Service → 无`。Service 之间可以互相依赖，但**不得反向依赖命令分发或数据面**——预缓冲逻辑因此独立为 `PreloadService`，控制面（`prepare` 预载）与数据面（`stream` 命中）共享同一单例缓存。**传输层依赖方向**：`HttpGateway（外壳）→ UnixSocketClient → UnixSocketServer → CommandDispatcher`，HTTP 不得越过 Unix Socket 直接触碰命令分发。
 
 **日志统一走 SLF4J**（`org.slf4j.Logger` + `LoggerFactory`）。业务代码里不应出现 `System.out.println`：启动 banner 由 `HelloMusicApplication` 承担，是有意的控制台呈现。唯一的例外是 `MetadataExtractor`——它需要用 `java.util.logging` 去静音 Jaudiotagger 内部的 JUL 输出，那是第三方库的强制要求。
 
@@ -705,7 +709,9 @@ jaudiotagger 会尝试 UTF-8/GBK 解码；确实没有标签的文件会走文�
 
 因此：**不要把它直接暴露到公网**，也不要在不可信的网络里长期运行。
 
-控制面现在**同时**暴露在 Unix Socket（仅本机进程可连接，socket 文件权限由文件系统控制）与 HTTP `POST /control`（默认 8080，可达局域网）上，因此它与数据面一样具备写权限风险：任何能访问该 HTTP 端口的客户端都能改配置、清队列、删歌单。如需在非本机网络使用，应在网络层（防火墙 / 反向代理）加鉴权；本机进程则仍可经 Unix Socket 绕开网络暴露。
+**HTTP 控制面鉴权（`controlToken`）**：配置文件中设置非空的 `controlToken` 后，HTTP `POST /control` 必须携带 `Authorization: Bearer <token>` 头，否则返回 `401`。令牌在启动时绑定，运行时 `config.set` 修改需**重启生效**；令牌为空（默认）则不启用鉴权，保持向后兼容。数据面 `/stream` `/cover` `/lyrics` 仍无鉴权（只读媒体，仅能读音乐库内文件）；Unix Socket 本机通道也不受令牌约束（由 socket 文件权限控制）。
+
+控制面**同时**暴露在 Unix Socket（仅本机进程可连接，socket 文件权限由文件系统控制）与 HTTP `POST /control`（默认 8080，可达局域网）上，因此它与数据面一样具备写权限风险：任何能访问该 HTTP 端口的客户端都能改配置、清队列、删歌单。配置 `controlToken` 可封堵这一写权限风险；若仍需在非本机网络使用，还应结合网络层（防火墙 / 反向代理）控制端口可达性。
 
 控制面还内置了几道**资源上限**，用于抵御基础的资源耗尽攻击（纵深防御，**不能替代鉴权**）：
 

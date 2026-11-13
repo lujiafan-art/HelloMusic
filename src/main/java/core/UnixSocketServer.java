@@ -41,12 +41,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
 /**
  * 控制面服务器：在 Unix domain socket 上监听，使用「JSON 行协议」与客户端通信。
  *
  * <p>每个连接一条线程（交给线程池管理）：逐行读取 JSON 请求，交给 {@link CommandDispatcher}
  * 分发，再把 JSON 响应写回一行。相比 HTTP，它零 TCP/IP 协议栈、不占端口、无端口冲突，适合
  * 本机高并发进程间控制。</p>
+ *
+ * <p>它是控制面的唯一实现：本机客户端直连它，HTTP 网关也把它当作后端——HTTP 只是它的一个
+ * 「外壳」（见 {@link HttpGateway}），不是另一条独立的控制路径。因此所有控制命令无论走哪条
+ * 传输层，最终都汇聚到本类。</p>
  *
  * <p>协议约定：</p>
  * <ul>
@@ -61,6 +67,13 @@ public class UnixSocketServer {
 
     /** 单行请求的字节数上限（64KB）。命令都是短 JSON，超限即拒绝并断开，防止恶意客户端发无限长行撑爆内存。 */
     static final int MAX_LINE_BYTES = 64 * 1024;
+
+    /**
+     * 传输层保留字段：HTTP 外壳在转发前把观测到的对端地址写入该字段，
+     * 服务端在分发前剥离它并作为 {@code remoteAddr} 传给 {@link CommandDispatcher}。
+     * 以 {@code @} 开头，避免与任何业务命令字段冲突。
+     */
+    static final String REMOTE_ADDR_FIELD = "@remoteAddr";
 
     private final Path socketPath;
     private final CommandDispatcher dispatcher;
@@ -110,6 +123,11 @@ public class UnixSocketServer {
         } finally {
             connectionPool.shutdown();
         }
+    }
+
+    /** 是否已完成 bind（socket 文件已创建、可接受连接）。供装配方在 HTTP 外壳启动前等待。 */
+    public boolean isBound() {
+        return serverChannel != null;
     }
 
     /**
@@ -209,8 +227,15 @@ public class UnixSocketServer {
                     Map.of("ok", false, "error", "请求必须是 JSON 对象", "status", 400)).toString();
         }
         try {
-            // Unix Socket 对端即本机进程，无 IP 语义，统一记为 "local"
-            return objectMapper.writeValueAsString(dispatcher.dispatch(request, "local"));
+            // 剥离传输层保留字段：HTTP 外壳会注入 @remoteAddr（观测到的真实对端地址），
+            // 本机直连客户端则无此字段，统一记为 "local"。
+            String remoteAddr = "local";
+            JsonNode addr = request.get(REMOTE_ADDR_FIELD);
+            if (addr != null && addr.isTextual() && !addr.asText().isBlank()) {
+                remoteAddr = addr.asText();
+                ((ObjectNode) request).remove(REMOTE_ADDR_FIELD);
+            }
+            return objectMapper.writeValueAsString(dispatcher.dispatch(request, remoteAddr));
         } catch (IOException e) {
             return objectMapper.valueToTree(
                     Map.of("ok", false, "error", "响应序列化失败", "status", 500)).toString();

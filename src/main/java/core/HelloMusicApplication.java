@@ -103,8 +103,13 @@ public final class HelloMusicApplication {
         socketThread.setDaemon(true);
         socketThread.start();
 
+        // HTTP 只是 Unix Socket 控制面的「外壳」：它把命令转发给本机 socket，不直接触碰 dispatcher。
+        // 因此必须先等 socket 完成 bind，否则 HTTP 启动后的首批请求会因控制面未就绪而 502。
+        awaitSocketBound(socketServer, socketPath);
+
         HttpGateway httpGateway = new HttpGateway(portOf(configManager), scannerService,
-                preloadService, dispatcher, mapper);
+                preloadService, new UnixSocketClient(socketPath, mapper), mapper,
+                configManager.getControlToken());
         try {
             httpGateway.start();
         } catch (Exception e) {
@@ -123,6 +128,22 @@ public final class HelloMusicApplication {
             executor.shutdownNow();
             scheduler.shutdownNow();
         }, "hellomusic-shutdown"));
+    }
+
+    /** 等待 Unix Socket 控制面完成 bind（有上限，超时仅告警不阻塞启动）。 */
+    private static void awaitSocketBound(UnixSocketServer socketServer, Path socketPath) {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline && !socketServer.isBound()) {
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        if (!socketServer.isBound()) {
+            System.err.println("⚠️  Unix Socket 控制面未在 5 秒内就绪，HTTP 控制命令可能暂时返回 502: " + socketPath);
+        }
     }
 
     /** 包装定时任务：异常不中断后续调度。 */

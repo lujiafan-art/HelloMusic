@@ -305,6 +305,9 @@ public class ConfigManager {
             log.warn("rescanInterval 由 " + before.rescanInterval + " 改为 "
                     + after.rescanInterval + "，需重启服务后生效（重扫调度已绑定启动时值）");
         }
+        if (!Objects.equals(before.controlToken, after.controlToken)) {
+            log.warn("controlToken 已变更，需重启服务后生效（HTTP 控制面鉴权已绑定启动时令牌）");
+        }
     }
 
     /**
@@ -345,6 +348,7 @@ public class ConfigManager {
         merged.logPath = patch.logPath != null ? patch.logPath : base.logPath;
         merged.enableHeartbeat = patch.enableHeartbeat != null ? patch.enableHeartbeat : base.enableHeartbeat;
         merged.unixSocketPath = patch.unixSocketPath != null ? patch.unixSocketPath : base.unixSocketPath;
+        merged.controlToken = patch.controlToken != null ? patch.controlToken : base.controlToken;
         return merged;
     }
 
@@ -444,6 +448,19 @@ public class ConfigManager {
     /** Unix Socket 文件路径（已展开 {@code ~} 前缀）；未配置时回退默认 {@link #DEFAULT_UNIX_SOCKET_PATH}。 */
     public Path getUnixSocketPath() {
         return expandHome(config.getUnixSocketPath(), defaultUnixSocketPath());
+    }
+
+    /**
+     * 控制面 HTTP 访问令牌（共享密钥）。未配置或为空白时返回 {@code null}，表示不启用鉴权；
+     * 否则返回去前后空白后的令牌，HTTP {@code POST /control} 须带 {@code Authorization: Bearer <token>}。
+     */
+    public String getControlToken() {
+        String t = config.getControlToken();
+        if (t == null) {
+            return null;
+        }
+        String trimmed = t.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     /** 开关型取值 → boolean：1=开启，0=关闭，其它（含 null）回退 {@code fallback}。 */
@@ -584,6 +601,14 @@ public class ConfigManager {
         @Pattern(regexp = ".*\\S.*", message = "Unix Socket 路径不能是空字符串或纯空白")
         private String unixSocketPath;
 
+        /**
+         * 控制面 HTTP 访问令牌（共享密钥）。客户端须带 {@code Authorization: Bearer <token>}
+         * 才能调用 {@code POST /control}。为 {@code null} 或空白时不启用鉴权，保持向后兼容；
+         * 本机 Unix Socket 通道不受此约束（受文件系统权限保护）。不设 {@code @Pattern}：
+         * token 是任意字符串，空白视为「未配置」，通过 config.set 传空字符串即可清除令牌。
+         */
+        private String controlToken;
+
         public Integer getServerPort() { return serverPort; }
         public void setServerPort(Integer serverPort) { this.serverPort = serverPort; }
         public Integer getBroadcastPort() { return broadcastPort; }
@@ -622,5 +647,7 @@ public class ConfigManager {
         public void setEnableHeartbeat(Integer enableHeartbeat) { this.enableHeartbeat = enableHeartbeat; }
         public String getUnixSocketPath() { return unixSocketPath; }
         public void setUnixSocketPath(String unixSocketPath) { this.unixSocketPath = unixSocketPath; }
+        public String getControlToken() { return controlToken; }
+        public void setControlToken(String controlToken) { this.controlToken = controlToken; }
     }
 }

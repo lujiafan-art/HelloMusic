@@ -22,6 +22,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -41,26 +42,44 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * HTTP 控制面测试：验证 {@code POST /control} 把 JSON 请求转发给
- * {@link CommandDispatcher}，并把响应里的 {@code status} 字段映射为真实的 HTTP 状态码。
+ * HTTP 网关测试：验证 HTTP 是 Unix Socket 控制面的「外壳」，而不是独立的控制实现。
  *
- * <p>用 {@code mock(CommandDispatcher.class)} 隔离开真实业务，只测传输层行为；
- * 网关以端口 {@code 0} 启动（系统分配临时端口），用 JDK 自带 {@link HttpClient} 发起真实请求。</p>
+ * <p>控制面测试起一个真实的 {@link UnixSocketServer}（内嵌 {@code mock(CommandDispatcher)}），
+ * 再用指向它的 {@link HttpGateway} 发真实 HTTP 请求——请求必须真正穿过 Unix Socket 链路，
+ * 转发到服务端、再透传回来。鉴权、请求体上限、数据面 Range 则在网关入口与媒体层独立验证。</p>
  */
 class HttpGatewayTest {
 
     private final ObjectMapper mapper = Json.newMapper();
+
+    @TempDir
+    Path tempDir;
+
     private HttpGateway gateway;
+    private UnixSocketServer socketServer;
+    private Thread socketThread;
 
     @AfterEach
     void tearDown() {
         if (gateway != null) {
             gateway.stop();
         }
+        if (socketServer != null) {
+            socketServer.stop();
+        }
+        if (socketThread != null) {
+            try {
+                socketThread.join(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
+    // ========== 控制面转发（Unix Socket 外壳） ==========
+
     @Test
-    void controlEndpointDispatchesAndReturns200() throws Exception {
+    void controlEndpointForwardsThroughUnixSocketAndReturns200() throws Exception {
         CommandDispatcher dispatcher = mock(CommandDispatcher.class);
         when(dispatcher.dispatch(any(JsonNode.class), any()))
                 .thenReturn(Map.of("ok", true, "data", Map.of("name", "HelloMusic")));
@@ -86,6 +105,39 @@ class HttpGatewayTest {
         assertFalse(body.get("ok").asBoolean());
         assertEquals("unknown", body.get("error").asText());
     }
+
+    @Test
+    void controlEndpointInjectsObservedRemoteAddrIntoForwardedRequest() throws Exception {
+        // HTTP 外壳应把观测到的对端地址写入保留字段 @remoteAddr，服务端剥离后作为 remoteAddr
+        // 传给 dispatcher（而非一律记 "local"）。这里捕获 dispatcher 收到的第二参验证之。
+        CommandDispatcher dispatcher = mock(CommandDispatcher.class);
+        final String[] capturedRemote = new String[1];
+        when(dispatcher.dispatch(any(JsonNode.class), any()))
+                .thenAnswer(inv -> {
+                    capturedRemote[0] = inv.getArgument(1, String.class);
+                    return Map.of("ok", true, "data", Map.of());
+                });
+
+        postTo(gatewayAt(dispatcher), "{\"cmd\":\"info\"}");
+
+        assertTrue(capturedRemote[0] != null && !"local".equals(capturedRemote[0]),
+                "HTTP 外壳应注入观测到的真实对端地址（而非让服务端回退为 local）");
+    }
+
+    @Test
+    void controlEndpointReturns502WhenSocketUnavailable() throws Exception {
+        // 外壳指向一个不存在的 socket：连接失败应映射为 502，而不是 500 或空响应
+        Path missing = tempDir.resolve("no-such.sock");
+        gateway = new HttpGateway(0, null, null, new UnixSocketClient(missing, mapper), mapper, null);
+        gateway.start();
+
+        HttpResponse<String> resp = postTo(gateway, "{\"cmd\":\"info\"}");
+
+        assertEquals(502, resp.statusCode(), "控制面不可达应返回 502");
+        assertFalse(mapper.readTree(resp.body()).get("ok").asBoolean());
+    }
+
+    // ========== 控制面入口校验（在转发之前） ==========
 
     @Test
     void controlEndpointRejectsMalformedJson() throws Exception {
@@ -126,6 +178,8 @@ class HttpGatewayTest {
         assertFalse(body.get("ok").asBoolean());
     }
 
+    // ========== 数据面（媒体） ==========
+
     @Test
     void multiRangeRequestReturnsOnlyFirstRange() throws Exception {
         // 多段 Range 请求应退化为「只返回第一段」，而非折叠成覆盖区间：折叠会返回客户端
@@ -144,7 +198,7 @@ class HttpGatewayTest {
         when(scanner.getMusicById("A")).thenReturn(Optional.of(musicFile));
         PreloadService preload = mock(PreloadService.class); // getPreloaded 返回 null → 走流式路径
 
-        gateway = new HttpGateway(0, scanner, preload, null, mapper);
+        gateway = new HttpGateway(0, scanner, preload, null, mapper, null);
         gateway.start();
 
         HttpClient client = HttpClient.newHttpClient();
@@ -166,20 +220,94 @@ class HttpGatewayTest {
         }
     }
 
-    /** 启动一个网关（端口 0，媒体协作者置空），返回已绑定端口的网关。 */
+    // ========== 控制面鉴权 ==========
+
+    @Test
+    void controlEndpointRejectsRequestWithoutTokenWhenConfigured() throws Exception {
+        CommandDispatcher dispatcher = mock(CommandDispatcher.class);
+        HttpGateway g = gatewayAt(dispatcher, "secret-token");
+
+        HttpResponse<String> resp = postTo(g, "{\"cmd\":\"info\"}");
+
+        assertEquals(401, resp.statusCode(), "配置了 token 后，无令牌请求应返回 401");
+    }
+
+    @Test
+    void controlEndpointRejectsWrongToken() throws Exception {
+        CommandDispatcher dispatcher = mock(CommandDispatcher.class);
+        HttpGateway g = gatewayAt(dispatcher, "secret-token");
+
+        HttpResponse<String> resp = postTo(g, "{\"cmd\":\"info\"}", "Bearer wrong-token");
+
+        assertEquals(401, resp.statusCode(), "错误令牌应返回 401");
+    }
+
+    @Test
+    void controlEndpointAcceptsCorrectToken() throws Exception {
+        CommandDispatcher dispatcher = mock(CommandDispatcher.class);
+        when(dispatcher.dispatch(any(JsonNode.class), any()))
+                .thenReturn(Map.of("ok", true, "data", Map.of("name", "HelloMusic")));
+        HttpGateway g = gatewayAt(dispatcher, "secret-token");
+
+        HttpResponse<String> resp = postTo(g, "{\"cmd\":\"info\"}", "Bearer secret-token");
+
+        assertEquals(200, resp.statusCode(), "正确令牌应放行并正常转发");
+        assertEquals("HelloMusic", mapper.readTree(resp.body()).get("data").get("name").asText());
+    }
+
+    @Test
+    void controlEndpointWithoutTokenConfiguredKeepsBackwardCompatibility() throws Exception {
+        CommandDispatcher dispatcher = mock(CommandDispatcher.class);
+        when(dispatcher.dispatch(any(JsonNode.class), any()))
+                .thenReturn(Map.of("ok", true, "data", Map.of("name", "HelloMusic")));
+        HttpGateway g = gatewayAt(dispatcher); // 未配置 token
+
+        HttpResponse<String> resp = postTo(g, "{\"cmd\":\"info\"}");
+
+        assertEquals(200, resp.statusCode(), "未配置 token 时保持无鉴权（向后兼容）");
+    }
+
+    // ========== 测试辅助 ==========
+
+    /** 起真实 Unix Socket 控制面（内嵌 mock dispatcher）+ 指向它的 HTTP 网关，返回已绑定端口的网关。 */
     private HttpGateway gatewayAt(CommandDispatcher dispatcher) throws Exception {
-        gateway = new HttpGateway(0, null, null, dispatcher, mapper);
+        return gatewayAt(dispatcher, null);
+    }
+
+    private HttpGateway gatewayAt(CommandDispatcher dispatcher, String controlToken) throws Exception {
+        Path sock = tempDir.resolve("control-" + System.nanoTime() + ".sock");
+        socketServer = new UnixSocketServer(sock, dispatcher, mapper);
+        socketThread = new Thread(socketServer::start, "http-test-socket");
+        socketThread.start();
+        awaitBound(socketServer);
+
+        gateway = new HttpGateway(0, null, null, new UnixSocketClient(sock, mapper), mapper, controlToken);
         gateway.start();
         return gateway;
     }
 
+    private static void awaitBound(UnixSocketServer server) throws Exception {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline && !server.isBound()) {
+            Thread.sleep(10);
+        }
+        assertTrue(server.isBound(), "Unix Socket 控制面未在 5 秒内完成 bind");
+    }
+
     private static HttpResponse<String> postTo(HttpGateway g, String body) throws Exception {
+        return postTo(g, body, null);
+    }
+
+    private static HttpResponse<String> postTo(HttpGateway g, String body, String authorization)
+            throws Exception {
         HttpClient client = HttpClient.newHttpClient();
-        HttpRequest request = HttpRequest.newBuilder()
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + g.getPort() + "/control"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
+                .header("Content-Type", "application/json");
+        if (authorization != null) {
+            builder.header("Authorization", authorization);
+        }
+        HttpRequest request = builder.POST(HttpRequest.BodyPublishers.ofString(body)).build();
         return client.send(request, HttpResponse.BodyHandlers.ofString());
     }
 }

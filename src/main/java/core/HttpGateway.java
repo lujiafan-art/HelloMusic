@@ -33,6 +33,7 @@ import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -45,10 +46,11 @@ import java.util.concurrent.ThreadPoolExecutor;
  *
  * <p>它同时承载两类内容，兑现「对外都是 HTTP」的约定：</p>
  * <ul>
- *   <li><b>控制面</b>：{@code POST /control} —— 把 JSON 请求体
- *       {@code {"cmd": "...", ...参数}} 转发给 {@link CommandDispatcher}，其响应中的
- *       {@code status} 字段被映射为真实的 HTTP 状态码。这样本机客户端走零拷贝的 Unix Socket
- *       （见 {@link UnixSocketServer}），局域网 / 远程客户端则通过 HTTP 走同一条命令分发链路；</li>
+ *   <li><b>控制面（Unix Socket 的外壳）</b>：{@code POST /control} —— 把 JSON 请求体
+ *       {@code {"cmd": "...", ...参数}} 注入观测到的对端地址后，经 {@link UnixSocketClient}
+ *       转发给本机 {@link UnixSocketServer} 处理，再把其响应里的 {@code status} 字段映射为真实
+ *       HTTP 状态码。HTTP 不是独立的控制实现，控制面逻辑的唯一入口是 {@link CommandDispatcher}，
+ *       且它只被 Unix Socket 服务器调用；</li>
  *   <li><b>数据面（媒体）</b>：{@code GET /stream/{id}}（音频流，支持 {@code Range} 拖动）、
  *       {@code GET /cover/{id}}（封面图）、{@code GET /lyrics/{id}}（歌词文本），
  *       供浏览器 {@code <audio>} / {@code <img>} 与局域网播放器直接拉取字节。</li>
@@ -68,9 +70,11 @@ public class HttpGateway {
     private final int port;
     private final MusicScannerService scannerService;
     private final PreloadService preloadService;
-    private final CommandDispatcher dispatcher;
+    private final UnixSocketClient controlClient;
     private final ObjectMapper objectMapper;
     private HttpServer server;
+    /** 控制面 HTTP 访问令牌；为 {@code null} 时不启用鉴权（向后兼容）。 */
+    private final String controlToken;
     /** 处理 HTTP 交换的有界线程池；与网关同生命周期，{@link #stop()} 时关闭（线程均为守护线程）。 */
     private final ExecutorService executor =
             ThreadPools.bounded("hellomusic-http", 16, 200,
@@ -79,13 +83,15 @@ public class HttpGateway {
     public HttpGateway(int port,
                        MusicScannerService scannerService,
                        PreloadService preloadService,
-                       CommandDispatcher dispatcher,
-                       ObjectMapper objectMapper) {
+                       UnixSocketClient controlClient,
+                       ObjectMapper objectMapper,
+                       String controlToken) {
         this.port = port;
         this.scannerService = scannerService;
         this.preloadService = preloadService;
-        this.dispatcher = dispatcher;
+        this.controlClient = controlClient;
         this.objectMapper = objectMapper;
+        this.controlToken = controlToken;
     }
 
     /** 启动 HTTP 网关（控制面 + 数据面）。调用方应放在独立线程，或做好阻塞准备。 */
@@ -132,6 +138,13 @@ public class HttpGateway {
             sendJson(exchange, 405, Map.of("ok", false, "error", "仅支持 POST", "status", 405));
             return;
         }
+        // 控制面鉴权：配置了 controlToken 时，HTTP 控制面须带正确令牌（Unix Socket 本机通道不受此约束）。
+        // 令牌在启动时绑定，运行时 config.set 修改需重启生效（见 ConfigManager.warnIfRestartRequired）。
+        if (controlToken != null && !authorized(exchange)) {
+            exchange.getResponseHeaders().set("WWW-Authenticate", "Bearer");
+            sendJson(exchange, 401, Map.of("ok", false, "error", "未授权：缺少或错误的访问令牌", "status", 401));
+            return;
+        }
 
         JsonNode request;
         try {
@@ -150,21 +163,45 @@ public class HttpGateway {
             return;
         }
 
-        Map<String, Object> response = dispatcher.dispatch(request, remoteAddrOf(exchange));
+        // HTTP 是 Unix Socket 控制面的「外壳」：把观测到的对端地址写入保留字段，
+        // 连同命令一并转发给本机 Unix Socket 服务器处理，再透传其响应。
+        ((com.fasterxml.jackson.databind.node.ObjectNode) request)
+                .put(UnixSocketServer.REMOTE_ADDR_FIELD, remoteAddrOf(exchange));
+
+        JsonNode response;
+        try {
+            response = controlClient.dispatch(request);
+        } catch (IOException e) {
+            // 控制面不可达（Unix Socket 未就绪 / 已停止 / 通信失败）→ 502 Bad Gateway
+            log.warn("控制面转发失败: " + e.getMessage());
+            sendJson(exchange, 502, Map.of("ok", false, "error", "控制面不可达", "status", 502));
+            return;
+        }
         sendJson(exchange, httpStatusOf(response), response);
     }
 
+    /** 校验请求是否携带正确的 {@code Authorization: Bearer <token>} 头（常量时间比较，防时序侧信道）。 */
+    private boolean authorized(HttpExchange exchange) {
+        String auth = exchange.getRequestHeaders().getFirst("Authorization");
+        if (auth == null) {
+            return false;
+        }
+        return MessageDigest.isEqual(
+                ("Bearer " + controlToken).getBytes(StandardCharsets.UTF_8),
+                auth.getBytes(StandardCharsets.UTF_8));
+    }
+
     /** 从命令响应中取 {@code status} 字段映射为 HTTP 状态码；成功响应无该字段，默认 200。 */
-    private static int httpStatusOf(Map<String, Object> response) {
-        Object status = response.get("status");
-        if (status instanceof Number number) {
-            int code = number.intValue();
+    private static int httpStatusOf(JsonNode response) {
+        JsonNode status = response.get("status");
+        if (status != null && status.isNumber()) {
+            int code = status.asInt();
             return code >= 100 && code <= 599 ? code : 500;
         }
         return 200;
     }
 
-    private void sendJson(HttpExchange exchange, int status, Map<String, Object> body) throws IOException {
+    private void sendJson(HttpExchange exchange, int status, Object body) throws IOException {
         byte[] bytes = objectMapper.writeValueAsBytes(body);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         exchange.sendResponseHeaders(status, bytes.length);

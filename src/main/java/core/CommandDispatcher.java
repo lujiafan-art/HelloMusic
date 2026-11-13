@@ -39,8 +39,9 @@ import java.util.concurrent.ExecutorService;
  * 行分隔（Unix Socket 的 JSON 行协议）或映射为 HTTP 状态码（{@link HttpGateway}）由调用方决定。</p>
  *
  * <p>命令清单与原 HTTP 端点一一对应（除音频流/封面/歌词三处二进制数据面由
- * {@link HttpGateway} 承担）。本类与传输层无关：既被本机 Unix Socket（{@link UnixSocketServer}）
- * 直接调用，也被 HTTP 网关的 {@code POST /control} 调用。</p>
+ * {@link HttpGateway} 承担）。本类是控制面的唯一实现，其唯一消费者是 {@link UnixSocketServer}
+ * （本机 JSON 行协议）。HTTP 网关的 {@code POST /control} 不直接调用本类——它只是
+ * Unix Socket 的「外壳」，把命令转发给 {@link UnixSocketServer} 处理。</p>
  * <ul>
  *   <li>会话：{@code connect} / {@code heartbeat} / {@code disconnect} / {@code session.status}</li>
  *   <li>播放：{@code mode} / {@code mode.switch} / {@code mode.set} / {@code current} /
