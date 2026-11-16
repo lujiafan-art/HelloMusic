@@ -758,7 +758,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ## 致谢
 
 - [DeepSeek](https://www.deepseek.com/) —— AI 辅助开发
-- [Adoptium](https://adoptium.net/) —— Java 发行版
 - [jaudiotagger](https://bitbucket.org/ijabz/jaudiotagger) —— 音频标签解析
 
 ---
